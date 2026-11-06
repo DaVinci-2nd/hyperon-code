@@ -1,7 +1,7 @@
 import "./styles.css";
 import * as api from "./api";
 import { state } from "./state";
-import { buildMessages } from "./ui/chat";
+import { bindFollow, buildMessages } from "./ui/chat";
 import { buildComposer } from "./ui/composer";
 import { el } from "./ui/dom";
 import { buildSettings } from "./ui/settings";
@@ -17,6 +17,7 @@ function buildMain(): HTMLElement {
   main.appendChild(el("div", "main-header", session ? session.title : "未选择会话"));
   main.appendChild(buildMessages());
   main.appendChild(buildComposer(render));
+  requestAnimationFrame(bindFollow);
   return main;
 }
 
@@ -50,21 +51,73 @@ function buildChatTab(): HTMLElement {
   return body;
 }
 
-function render(): void {
-  root.replaceChildren();
-
-  const app = el("div", "app");
-  app.appendChild(buildTopbar(render));
-
-  if (state.tab === "chat") {
-    app.appendChild(buildChatTab());
-  } else if (state.tab === "settings") {
-    app.appendChild(buildSettings(render));
+function swapBody(next: HTMLElement): void {
+  const old = root.querySelector(".body, .settings, .blank-tab");
+  if (old) {
+    old.replaceWith(next);
   } else {
-    app.appendChild(el("div", "blank-tab"));
+    const app = root.querySelector(".app");
+    if (app) app.appendChild(next);
+    else render();
+  }
+}
+
+function renderSidebar(): void {
+  const old = root.querySelector(".sidebar");
+  if (old) old.replaceWith(buildSidebar(render));
+}
+
+function renderMessages(): void {
+  const old = root.querySelector(".messages");
+  if (!old) {
+    render();
+    return;
+  }
+  const next = buildMessages();
+  old.replaceWith(next);
+  requestAnimationFrame(bindFollow);
+}
+
+function renderHeader(): void {
+  const head = root.querySelector(".main-header");
+  if (!head) return;
+  const session = state.sessions.find((s) => s.id === state.currentSessionId);
+  head.textContent = session ? session.title : "未选择会话";
+}
+
+function renderTopbar(): void {
+  const old = root.querySelector(".topbar");
+  if (old) old.replaceWith(buildTopbar(render));
+}
+
+function render(): void {
+  const app = root.querySelector(".app") as HTMLElement | null;
+
+  if (!app) {
+    root.replaceChildren();
+    const fresh = el("div", "app");
+    fresh.appendChild(buildTopbar(render));
+    fresh.appendChild(buildChatTab());
+    root.appendChild(fresh);
+    return;
   }
 
-  root.appendChild(app);
+  renderTopbar();
+  renderHeader();
+
+  if (state.tab === "chat") {
+    const existing = app.querySelector(".body");
+    if (existing) {
+      renderSidebar();
+      renderMessages();
+    } else {
+      swapBody(buildChatTab());
+    }
+  } else if (state.tab === "settings") {
+    if (!app.querySelector(".settings")) swapBody(buildSettings(render));
+  } else {
+    if (!app.querySelector(".blank-tab")) swapBody(el("div", "blank-tab"));
+  }
 }
 
 async function boot(): Promise<void> {

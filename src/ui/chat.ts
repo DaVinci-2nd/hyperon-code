@@ -1,34 +1,99 @@
-import { renderMarkdown } from "../markdown";
+import { renderMarkdown, renderMarkdownTail } from "../markdown";
 import { state } from "../state";
+import type { Part } from "../types";
 import { el } from "./dom";
 
-function thinkingBlock(text: string): HTMLElement {
+const INITIAL_LIMIT = 30;
+
+function foldBlock(
+  label: string,
+  body: HTMLElement,
+  extraClass = ""
+): HTMLDetailsElement {
   const details = document.createElement("details");
-  details.className = "think-block";
+  details.className = `fold-block ${extraClass}`.trim();
   details.open = true;
   const summary = document.createElement("summary");
-  summary.className = "think-head";
-  summary.textContent = "思考过程";
+  summary.className = "fold-head";
+  summary.textContent = label;
   details.appendChild(summary);
-  const body = el("div", "think-body");
-  body.innerHTML = renderMarkdown(text);
-  details.appendChild(body);
+  const inner = el("div", "fold-body");
+  inner.appendChild(body);
+  details.appendChild(inner);
   return details;
 }
 
-function messageRow(
-  role: string,
-  content: string,
-  reasoning = ""
-): HTMLElement {
+function thinkPart(text: string): HTMLElement {
+  const body = el("div", "think-body");
+  body.innerHTML = renderMarkdown(text);
+  return foldBlock("思考过程", body, "think-block");
+}
+
+function toolPart(part: Part): HTMLElement {
+  const body = el("div", "tool-body");
+  if (part.detail) {
+    const pre = el("pre", "tool-output");
+    pre.textContent = part.detail;
+    body.appendChild(pre);
+  } else {
+    body.appendChild(el("div", "empty-hint", "无输出"));
+  }
+  const mark = part.ok ? "✓" : "✕";
+  return foldBlock(`${mark} ${part.summary}`, body, "tool-block");
+}
+
+function textPart(text: string): HTMLElement {
+  const body = el("div", "msg-body");
+  body.innerHTML = renderMarkdown(text);
+  return body;
+}
+
+function partNode(p: Part): HTMLElement {
+  if (p.kind === "think") return thinkPart(p.text);
+  if (p.kind === "tool") return toolPart(p);
+  return textPart(p.text);
+}
+
+interface MessageLike {
+  content: string;
+  reasoning?: string;
+  parts?: Part[];
+}
+
+function messageRow(role: string, message?: MessageLike): HTMLElement {
   const row = el("div", `msg msg-${role}`);
   const holder = el("div", role === "user" ? "msg-bubble" : "msg-plain");
-  if (role === "assistant" && reasoning) {
-    holder.appendChild(thinkingBlock(reasoning));
+
+  if (role === "user") {
+    const body = el("div", "msg-body");
+    body.innerHTML = renderMarkdown(message?.content ?? "");
+    holder.appendChild(body);
+  } else {
+    const parts = message?.parts ?? [];
+    if (parts.length === 0) {
+      const fallback: Part[] = [];
+      if (message?.reasoning) {
+        fallback.push({
+          kind: "think",
+          text: message.reasoning,
+          summary: "",
+          detail: "",
+          ok: true,
+        });
+      }
+      fallback.push({
+        kind: "text",
+        text: message?.content ?? "",
+        summary: "",
+        detail: "",
+        ok: true,
+      });
+      fallback.forEach((p) => holder.appendChild(partNode(p)));
+    } else {
+      parts.forEach((p) => holder.appendChild(partNode(p)));
+    }
   }
-  const body = el("div", "msg-body");
-  body.innerHTML = renderMarkdown(content);
-  holder.appendChild(body);
+
   row.appendChild(holder);
   return row;
 }
@@ -44,48 +109,107 @@ export function buildMessages(): HTMLElement {
 
   if (state.messages.length === 0) {
     box.appendChild(el("div", "empty-hint center", "发一条消息开始"));
+    return box;
   }
 
-  state.messages.forEach((m) => {
-    box.appendChild(messageRow(m.role, m.content, m.reasoning));
-  });
+  const total = state.messages.length;
+  const start = Math.max(0, total - INITIAL_LIMIT);
+
+  if (start > 0) {
+    const more = el("button", "load-more", `加载更早的 ${start} 条`);
+    more.addEventListener("click", () => {
+      more.remove();
+      const frag = document.createDocumentFragment();
+      for (let i = 0; i < start; i++) {
+        const m = state.messages[i];
+        frag.appendChild(messageRow(m.role, m));
+      }
+      box.insertBefore(frag, box.firstChild);
+      const prevTop = box.scrollHeight;
+      requestAnimationFrame(() => {
+        box.scrollTop = box.scrollTop + (box.scrollHeight - prevTop);
+      });
+    });
+    box.appendChild(more);
+  }
+
+  for (let i = start; i < total; i++) {
+    const m = state.messages[i];
+    box.appendChild(messageRow(m.role, m));
+  }
   return box;
 }
 
-export function scrollMessagesToEnd(): void {
+let scrollPending = false;
+let followTail = true;
+
+export function resetFollow(): void {
+  followTail = true;
+}
+
+export function requestScroll(): void {
+  if (scrollPending) return;
+  scrollPending = true;
+  requestAnimationFrame(() => {
+    scrollPending = false;
+    if (!followTail) return;
+    const box = document.getElementById("messages");
+    if (box) box.scrollTop = box.scrollHeight;
+  });
+}
+
+export function bindFollow(): void {
   const box = document.getElementById("messages");
-  if (box) box.scrollTop = box.scrollHeight;
+  if (!box) return;
+  box.addEventListener(
+    "scroll",
+    () => {
+      const gap = box.scrollHeight - box.scrollTop - box.clientHeight;
+      followTail = gap < 80;
+    },
+    { passive: true }
+  );
 }
 
 export function appendStreamingRow(): HTMLElement | null {
   const box = document.getElementById("messages");
   if (!box) return null;
-  const row = messageRow("assistant", "");
+  const row = messageRow("assistant", { content: "", parts: [] });
   row.id = "streaming-row";
+  const holder = row.querySelector(".msg-plain");
+  if (holder) holder.replaceChildren();
   box.appendChild(row);
   return row;
 }
 
-export function updateStreamingRow(
-  row: HTMLElement,
-  text: string,
-  reasoning = ""
-): void {
-  const holder = row.querySelector(".msg-plain");
+export interface StreamPatch {
+  index: number;
+  part: Part;
+}
+
+export function patchStreamingRow(row: HTMLElement, patch: StreamPatch): void {
+  const holder = row.querySelector(".msg-plain") as HTMLElement | null;
   if (!holder) return;
 
-  let block = holder.querySelector(".think-block") as HTMLDetailsElement | null;
-  if (reasoning) {
-    if (!block) {
-      block = thinkingBlock(reasoning) as HTMLDetailsElement;
-      holder.insertBefore(block, holder.firstChild);
-    } else {
-      const body = block.querySelector(".think-body");
-      if (body) body.innerHTML = renderMarkdown(reasoning);
-    }
+  let node = holder.children[patch.index] as HTMLElement | undefined;
+  if (!node) {
+    node = partNode(patch.part);
+    node.dataset.part = String(patch.index);
+    holder.appendChild(node);
+    return;
   }
 
-  const body = holder.querySelector(".msg-body");
-  if (body) body.innerHTML = renderMarkdown(text || "…");
-  scrollMessagesToEnd();
+  if (patch.part.kind === "think") {
+    const body = node.querySelector(".think-body");
+    if (body) body.innerHTML = renderMarkdownTail(patch.part.text || "…");
+  } else if (patch.part.kind === "tool") {
+    const head = node.querySelector(".fold-head");
+    if (head) {
+      head.textContent = `${patch.part.ok ? "✓" : "✕"} ${patch.part.summary}`;
+    }
+    const out = node.querySelector(".tool-output");
+    if (out) out.textContent = patch.part.detail;
+  } else {
+    node.innerHTML = renderMarkdownTail(patch.part.text || "…");
+  }
 }

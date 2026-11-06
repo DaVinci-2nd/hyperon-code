@@ -45,6 +45,10 @@ export function getMessages(sessionId: string): Promise<Message[]> {
   return invoke<Message[]>("get_messages", { sessionId });
 }
 
+export function approve(id: string, allowed: boolean): Promise<boolean> {
+  return invoke<boolean>("approve", { id, allowed });
+}
+
 export function sendMessage(
   sessionId: string,
   providerId: string,

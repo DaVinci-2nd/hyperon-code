@@ -63,6 +63,19 @@ pub struct Session {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Part {
+    pub kind: String,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub detail: String,
+    #[serde(default)]
+    pub ok: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub id: String,
     pub session_id: String,
@@ -70,6 +83,8 @@ pub struct Message {
     pub content: String,
     #[serde(default)]
     pub reasoning: String,
+    #[serde(default)]
+    pub parts: Vec<Part>,
     #[serde(default)]
     pub created_at: i64,
 }

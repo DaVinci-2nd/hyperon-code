@@ -1,14 +1,34 @@
+mod approval;
 mod chat;
 mod presets;
 mod store;
+mod tools;
 
+use approval::Pending;
 use chat::ChatMessage;
 use presets::Preset;
 use serde::Serialize;
 use std::sync::Arc;
 use store::{Message, Project, Provider, Session, Settings, BUILTIN_PROJECT_ID};
 use tauri::ipc::Channel;
-use tauri::AppHandle;
+use tauri::{AppHandle, State};
+
+pub struct AppState {
+    pending: Arc<Pending>,
+}
+
+impl AppState {
+    fn new() -> Self {
+        Self {
+            pending: Arc::new(Pending::new()),
+        }
+    }
+}
+
+#[tauri::command]
+fn approve(state: State<'_, AppState>, id: String, allowed: bool) -> bool {
+    state.pending.resolve(&id, allowed)
+}
 
 #[derive(Serialize)]
 struct Snapshot {
@@ -155,6 +175,7 @@ fn get_messages_sync(app: AppHandle, session_id: String) -> Result<Vec<Message>,
 #[tauri::command]
 async fn send_message(
     app: AppHandle,
+    state: State<'_, AppState>,
     session_id: String,
     provider_id: String,
     content: String,
@@ -171,6 +192,7 @@ async fn send_message(
             role: "user".to_string(),
             content: content.clone(),
             reasoning: String::new(),
+            parts: Vec::new(),
             created_at: store::now_ms(),
         });
         if let Some(s) = db.sessions.iter_mut().find(|s| s.id == session_id) {
@@ -189,15 +211,19 @@ async fn send_message(
         .cloned()
         .ok_or_else(|| "模型未配置".to_string())?;
 
-    let history: Vec<ChatMessage> = db
+    let mut history: Vec<ChatMessage> = db
         .messages
         .iter()
         .filter(|m| m.session_id == session_id)
-        .map(|m| ChatMessage {
-            role: m.role.clone(),
-            content: m.content.clone(),
-        })
+        .map(|m| ChatMessage::text(&m.role, &m.content))
         .collect();
+
+    let root = db
+        .sessions
+        .iter()
+        .find(|s| s.id == session_id)
+        .and_then(|s| db.projects.iter().find(|p| p.id == s.project_id))
+        .and_then(|p| p.dirs.first().cloned());
 
     let assistant_id = store::new_id();
     {
@@ -208,6 +234,7 @@ async fn send_message(
             role: "assistant".to_string(),
             content: String::new(),
             reasoning: String::new(),
+            parts: Vec::new(),
             created_at: store::now_ms(),
         });
         store::save(&app, &db2)?;
@@ -217,11 +244,17 @@ async fn send_message(
         let _ = channel.send(event);
     });
 
+    let ctx = chat::Ctx {
+        root,
+        pending: state.pending.clone(),
+    };
+
     let result = chat::stream(
         &provider,
-        history,
+        &mut history,
         &db.settings.system_prompt,
         sink,
+        &ctx,
     )
     .await;
 
@@ -231,6 +264,7 @@ async fn send_message(
             if let Some(m) = db3.messages.iter_mut().find(|m| m.id == assistant_id) {
                 m.content = acc.content;
                 m.reasoning = acc.reasoning;
+                m.parts = acc.parts;
             }
             store::save(&app, &db3)?;
             Ok(assistant_id)
@@ -249,6 +283,7 @@ async fn send_message(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(AppState::new())
         .invoke_handler(tauri::generate_handler![
             load_all,
             save_settings,
@@ -262,6 +297,7 @@ pub fn run() {
             delete_session,
             get_messages,
             get_messages_sync,
+            approve,
             send_message
         ])
         .run(tauri::generate_context!())

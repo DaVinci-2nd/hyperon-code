@@ -1,6 +1,13 @@
 import * as api from "../api";
 import { state } from "../state";
-import { appendStreamingRow, updateStreamingRow } from "./chat";
+import type { Part } from "../types";
+import { openApproval } from "./approval";
+import {
+  appendStreamingRow,
+  patchStreamingRow,
+  requestScroll,
+  resetFollow,
+} from "./chat";
 import { el, option } from "./dom";
 
 const THINK_LABEL: Record<string, string> = {
@@ -79,31 +86,78 @@ export function buildComposer(onDone: () => void): HTMLElement {
       role: "user",
       content: text,
       reasoning: "",
+      parts: [],
       created_at: Date.now(),
     });
     onDone();
+    resetFollow();
 
     const row = appendStreamingRow();
-    let buffer = "";
-    let reasoning = "";
+    const parts: Part[] = [];
+    let current: Part | null = null;
+
+    let frame = 0;
+    let dirtyIndex = -1;
+    const flush = (): void => {
+      frame = 0;
+      if (row && dirtyIndex >= 0 && dirtyIndex < parts.length) {
+        patchStreamingRow(row, { index: dirtyIndex, part: parts[dirtyIndex] });
+      }
+      dirtyIndex = -1;
+      requestScroll();
+    };
+    const schedule = (index: number): void => {
+      dirtyIndex = index;
+      if (!frame) frame = requestAnimationFrame(flush);
+    };
+
+    const pushPart = (kind: string): Part => {
+      const p: Part = {
+        kind,
+        text: "",
+        summary: "",
+        detail: "",
+        ok: true,
+      };
+      parts.push(p);
+      current = p;
+      return p;
+    };
 
     try {
       await api.sendMessage(sessionId, providerId, text, (event) => {
-        if (event.type === "delta") {
-          buffer += event.text;
-          if (row) updateStreamingRow(row, buffer, reasoning);
-        } else if (event.type === "reasoning") {
-          reasoning += event.text;
-          if (row) updateStreamingRow(row, buffer, reasoning);
+        if (event.type === "reasoning") {
+          if (!current || current.kind !== "think") pushPart("think");
+          current!.text += event.text;
+          schedule(parts.length - 1);
+        } else if (event.type === "delta") {
+          if (!current || current.kind !== "text") pushPart("text");
+          current!.text += event.text;
+          schedule(parts.length - 1);
+        } else if (event.type === "approval") {
+          openApproval(event);
+        } else if (event.type === "toolend") {
+          parts.push({
+            kind: "tool",
+            text: "",
+            summary: event.summary,
+            detail: event.detail,
+            ok: event.ok,
+          });
+          current = null;
+          schedule(parts.length - 1);
         } else if (event.type === "error") {
-          buffer += `\n\n请求失败：${event.message}`;
-          if (row) updateStreamingRow(row, buffer, reasoning);
+          pushPart("text");
+          current!.text += `\n\n请求失败：${event.message}`;
+          schedule(parts.length - 1);
         }
       });
       state.messages = await api.getMessages(sessionId);
     } catch (err) {
       state.messages = await api.getMessages(sessionId);
-      if (row) updateStreamingRow(row, `请求失败：${String(err)}`, reasoning);
+      pushPart("text");
+      current!.text += `\n\n请求失败：${String(err)}`;
+      schedule(parts.length - 1);
     } finally {
       state.streaming = false;
       send.removeAttribute("disabled");

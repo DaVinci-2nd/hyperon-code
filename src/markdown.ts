@@ -60,6 +60,59 @@ const md: MarkdownIt = new MarkdownIt({
   },
 });
 
+const cache = new Map<string, string>();
+const CACHE_LIMIT = 400;
+
 export function renderMarkdown(source: string): string {
-  return md.render(source);
+  const hit = cache.get(source);
+  if (hit !== undefined) return hit;
+  const html = md.render(source);
+  if (cache.size >= CACHE_LIMIT) {
+    const first = cache.keys().next().value;
+    if (first !== undefined) cache.delete(first);
+  }
+  cache.set(source, html);
+  return html;
+}
+
+export interface TailState {
+  head: string;
+  base: number;
+  tail: string;
+}
+
+const TAIL_MARKS = ["\n\n", "\n```", "\n# ", "\n## ", "\n### ", "\n- ", "\n1. ", "\n| "];
+
+export function splitTail(source: string): TailState {
+  let cut = -1;
+  for (const mark of TAIL_MARKS) {
+    const idx = source.lastIndexOf(mark);
+    if (idx > cut) cut = idx;
+  }
+  if (cut <= 0) {
+    return { head: "", base: 0, tail: source };
+  }
+  return { head: source.slice(0, cut), base: cut, tail: source.slice(cut) };
+}
+
+export function renderMarkdownTail(source: string): string {
+  const full = cache.get(source);
+  if (full !== undefined) return full;
+
+  const { head, base, tail } = splitTail(source);
+  const headHtml = base > 0 ? renderMarkdown(head) : "";
+  const tailHtml = md.render(tail);
+  const html = headHtml + tailHtml;
+
+  if (head.length > 0) {
+    const prev = cache.get(head);
+    if (prev === undefined) {
+      if (cache.size >= CACHE_LIMIT) {
+        const first = cache.keys().next().value;
+        if (first !== undefined) cache.delete(first);
+      }
+      cache.set(head, headHtml);
+    }
+  }
+  return html;
 }
