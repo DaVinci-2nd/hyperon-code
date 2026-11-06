@@ -56,6 +56,7 @@ export interface Preset {
 export interface Settings {
   theme: string;
   system_prompt: string;
+  strip_thinking: boolean;
 }
 
 export interface Snapshot {

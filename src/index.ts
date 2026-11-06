@@ -73,8 +73,11 @@ function renderMessages(): void {
     render();
     return;
   }
+  const atBottom =
+    old.scrollHeight - old.scrollTop - old.clientHeight < 80;
   const next = buildMessages();
   old.replaceWith(next);
+  if (atBottom) next.scrollTop = next.scrollHeight;
   requestAnimationFrame(bindFollow);
 }
 
@@ -126,6 +129,7 @@ async function boot(): Promise<void> {
   state.sessions = snap.sessions;
   state.providers = snap.providers;
   state.messages = snap.messages;
+  state.settings = snap.settings;
   state.theme = snap.settings.theme === "light" ? "light" : "dark";
   document.documentElement.dataset.theme = state.theme;
 

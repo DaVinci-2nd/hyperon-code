@@ -5,6 +5,7 @@ import type {
   Project,
   Provider,
   Session,
+  Settings,
   Theme,
 } from "./types";
 
@@ -19,6 +20,12 @@ export const state = {
   providers: [] as Provider[],
   presets: [] as Preset[],
   messages: [] as Message[],
+
+  settings: {
+    theme: "dark",
+    system_prompt: "",
+    strip_thinking: true,
+  } as Settings,
 
   currentProjectId: null as string | null,
   currentSessionId: null as string | null,

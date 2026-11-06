@@ -200,8 +200,11 @@ export function patchStreamingRow(row: HTMLElement, patch: StreamPatch): void {
   }
 
   if (patch.part.kind === "think") {
-    const body = node.querySelector(".think-body");
-    if (body) body.innerHTML = renderMarkdownTail(patch.part.text || "…");
+    const body = node.querySelector(".think-body") as HTMLElement | null;
+    if (body) {
+      body.innerHTML = renderMarkdownTail(patch.part.text || "…");
+      body.scrollTop = body.scrollHeight;
+    }
   } else if (patch.part.kind === "tool") {
     const head = node.querySelector(".fold-head");
     if (head) {

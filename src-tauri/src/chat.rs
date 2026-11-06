@@ -37,6 +37,8 @@ pub struct ChatMessage {
     pub role: String,
     pub content: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
@@ -47,6 +49,17 @@ impl ChatMessage {
         Self {
             role: role.to_string(),
             content: content.to_string(),
+            reasoning: None,
+            tool_calls: None,
+            tool_call_id: None,
+        }
+    }
+
+    pub fn with_reasoning(role: &str, content: &str, reasoning: Option<String>) -> Self {
+        Self {
+            role: role.to_string(),
+            content: content.to_string(),
+            reasoning,
             tool_calls: None,
             tool_call_id: None,
         }
@@ -60,6 +73,7 @@ pub struct Acc {
     pub reasoning: String,
     pub parts: Vec<Part>,
     pub tool_calls: Vec<ToolCall>,
+    pub truncated: bool,
     reasoning_open: bool,
     text_open: bool,
 }
@@ -71,6 +85,7 @@ impl Acc {
             reasoning: String::new(),
             parts: Vec::new(),
             tool_calls: Vec::new(),
+            truncated: false,
             reasoning_open: false,
             text_open: false,
         }
@@ -109,14 +124,25 @@ pub async fn stream(
 ) -> Result<Acc, String> {
     let mut total = Acc::new();
 
-    for _round in 0..12 {
+    loop {
         let mut round = Acc::new();
-        let calls = run_round(provider, messages, system_prompt, &sink, &mut round).await?;
+        let outcome = run_round(provider, messages, system_prompt, &sink, &mut round).await;
 
         round.close_reasoning(&sink);
         total.content.push_str(&round.content);
         total.reasoning.push_str(&round.reasoning);
         total.parts.extend(round.parts);
+
+        let calls = match outcome {
+            Ok(calls) => calls,
+            Err(err) => {
+                total.truncated = true;
+                sink(StreamEvent::Error {
+                    message: err.clone(),
+                });
+                return Ok(total);
+            }
+        };
 
         if calls.is_empty() {
             sink(StreamEvent::Done);
@@ -150,24 +176,18 @@ pub async fn stream(
                 "user denied".to_string()
             };
 
-            let shown = if result.len() > 2000 {
-                format!("{}\n… 已截断", &result[..2000])
-            } else {
-                result.clone()
-            };
-
             total.parts.push(Part {
                 kind: "tool".to_string(),
                 text: String::new(),
                 summary: preview.summary.clone(),
-                detail: shown.clone(),
+                detail: result.clone(),
                 ok: approved,
             });
 
             sink(StreamEvent::ToolEnd {
                 id: call.id.clone(),
                 summary: preview.summary.clone(),
-                detail: shown,
+                detail: result.clone(),
                 tool: call.name.clone(),
                 ok: approved,
             });
@@ -175,11 +195,6 @@ pub async fn stream(
             messages.push(build_tool_result(provider, call, &result));
         }
     }
-
-    sink(StreamEvent::Error {
-        message: "工具调用轮次超限".to_string(),
-    });
-    Err("工具调用轮次超限".to_string())
 }
 
 async fn run_round(
@@ -213,6 +228,7 @@ fn build_assistant_call(content: &str, calls: &[ToolCall]) -> ChatMessage {
     ChatMessage {
         role: "assistant".to_string(),
         content: content.to_string(),
+        reasoning: None,
         tool_calls: Some(Value::Array(list)),
         tool_call_id: None,
     }
@@ -228,6 +244,7 @@ fn build_tool_result(provider: &Provider, call: &ToolCall, result: &str) -> Chat
         ChatMessage {
             role: "user".to_string(),
             content: payload.to_string(),
+            reasoning: None,
             tool_calls: None,
             tool_call_id: Some(call.id.clone()),
         }
@@ -241,6 +258,7 @@ fn build_tool_result(provider: &Provider, call: &ToolCall, result: &str) -> Chat
         ChatMessage {
             role: "user".to_string(),
             content: payload.to_string(),
+            reasoning: None,
             tool_calls: None,
             tool_call_id: Some(call.id.clone()),
         }
@@ -248,6 +266,7 @@ fn build_tool_result(provider: &Provider, call: &ToolCall, result: &str) -> Chat
         ChatMessage {
             role: "tool".to_string(),
             content: result.to_string(),
+            reasoning: None,
             tool_calls: None,
             tool_call_id: Some(call.id.clone()),
         }
@@ -316,6 +335,9 @@ fn build_openai_body(
     }
     for m in messages {
         let mut item = json!({ "role": m.role, "content": m.content });
+        if let Some(reasoning) = &m.reasoning {
+            item["reasoning_content"] = json!(reasoning);
+        }
         if let Some(calls) = &m.tool_calls {
             item["tool_calls"] = calls.clone();
         }
@@ -485,22 +507,36 @@ fn anthropic_message(m: &ChatMessage) -> Value {
     let mut out = json!({ "role": m.role, "content": m.content });
     if let Some(calls) = &m.tool_calls {
         if let Some(list) = calls.as_array() {
-            let blocks: Vec<Value> = list
-                .iter()
-                .map(|c| {
-                    let args: Value = c["function"]["arguments"]
-                        .as_str()
-                        .and_then(|s| serde_json::from_str(s).ok())
-                        .unwrap_or(json!({}));
-                    json!({
-                        "type": "tool_use",
-                        "id": c["id"],
-                        "name": c["function"]["name"],
-                        "input": args
-                    })
-                })
-                .collect();
+            let mut blocks: Vec<Value> = Vec::new();
+            if let Some(reasoning) = &m.reasoning {
+                if !reasoning.is_empty() {
+                    blocks.push(json!({
+                        "type": "thinking",
+                        "thinking": reasoning,
+                        "signature": ""
+                    }));
+                }
+            }
+            for c in list {
+                let args: Value = c["function"]["arguments"]
+                    .as_str()
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or(json!({}));
+                blocks.push(json!({
+                    "type": "tool_use",
+                    "id": c["id"],
+                    "name": c["function"]["name"],
+                    "input": args
+                }));
+            }
             out["content"] = Value::Array(blocks);
+        }
+    } else if let Some(reasoning) = &m.reasoning {
+        if !reasoning.is_empty() {
+            out["content"] = json!([
+                { "type": "thinking", "thinking": reasoning, "signature": "" },
+                { "type": "text", "text": m.content }
+            ]);
         }
     }
     if let Some(id) = &m.tool_call_id {
@@ -645,27 +681,41 @@ fn gemini_content(m: &ChatMessage) -> Value {
     let role = if m.role == "assistant" { "model" } else { "user" };
     if let Some(calls) = &m.tool_calls {
         if let Some(list) = calls.as_array() {
-            let parts: Vec<Value> = list
-                .iter()
-                .map(|c| {
-                    let args: Value = c["function"]["arguments"]
-                        .as_str()
-                        .and_then(|s| serde_json::from_str(s).ok())
-                        .unwrap_or(json!({}));
-                    json!({
-                        "functionCall": {
-                            "name": c["function"]["name"],
-                            "args": args
-                        }
-                    })
-                })
-                .collect();
+            let mut parts: Vec<Value> = Vec::new();
+            if let Some(reasoning) = &m.reasoning {
+                if !reasoning.is_empty() {
+                    parts.push(json!({ "text": reasoning, "thought": true }));
+                }
+            }
+            for c in list {
+                let args: Value = c["function"]["arguments"]
+                    .as_str()
+                    .and_then(|s| serde_json::from_str(s).ok())
+                    .unwrap_or(json!({}));
+                parts.push(json!({
+                    "functionCall": {
+                        "name": c["function"]["name"],
+                        "args": args
+                    }
+                }));
+            }
             return json!({ "role": role, "parts": parts });
         }
     }
     if m.tool_call_id.is_some() && m.role == "user" {
         let parts: Value = serde_json::from_str(&m.content).unwrap_or_else(|_| json!([]));
         return json!({ "role": "user", "parts": parts });
+    }
+    if let Some(reasoning) = &m.reasoning {
+        if !reasoning.is_empty() {
+            return json!({
+                "role": role,
+                "parts": [
+                    { "text": reasoning, "thought": true },
+                    { "text": m.content }
+                ]
+            });
+        }
     }
     json!({ "role": role, "parts": [{ "text": m.content }] })
 }

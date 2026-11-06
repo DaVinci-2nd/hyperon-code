@@ -176,13 +176,8 @@ fn diff_text(old: &str, new: &str) -> String {
     let mut out: Vec<String> = Vec::new();
     let mut i = 0usize;
     let mut j = 0usize;
-    let mut shown = 0usize;
 
     while i < old_lines.len() || j < new_lines.len() {
-        if shown >= 400 {
-            out.push("… 差异过长，已截断".to_string());
-            break;
-        }
         if i < old_lines.len() && j < new_lines.len() && old_lines[i] == new_lines[j] {
             i += 1;
             j += 1;
@@ -191,12 +186,10 @@ fn diff_text(old: &str, new: &str) -> String {
         if i < old_lines.len() {
             out.push(format!("- {}", old_lines[i]));
             i += 1;
-            shown += 1;
             continue;
         }
         out.push(format!("+ {}", new_lines[j]));
         j += 1;
-        shown += 1;
     }
     out.join("\n")
 }
@@ -214,9 +207,18 @@ fn run(name: &str, args: &Value, root: Option<&str>) -> Result<String, String> {
             let path = args["path"].as_str().ok_or("缺 path")?;
             let abs = resolve(root, path);
             let text = fs::read_to_string(&abs).map_err(|e| e.to_string())?;
+            let has_offset = args["offset"].is_number();
+            let has_limit = args["limit"].is_number();
+            if !has_offset && !has_limit {
+                return Ok(text);
+            }
             let offset = args["offset"].as_u64().unwrap_or(0) as usize;
-            let limit = args["limit"].as_u64().unwrap_or(2000) as usize;
-            let lines: Vec<&str> = text.lines().skip(offset).take(limit).collect();
+            let lines: Vec<&str> = if has_limit {
+                let limit = args["limit"].as_u64().unwrap_or(0) as usize;
+                text.lines().skip(offset).take(limit).collect()
+            } else {
+                text.lines().skip(offset).collect()
+            };
             Ok(lines.join("\n"))
         }
         "write" => {
@@ -258,7 +260,7 @@ fn run(name: &str, args: &Value, root: Option<&str>) -> Result<String, String> {
             let pattern = args["pattern"].as_str().ok_or("缺 pattern")?;
             let base = resolve(root, args["path"].as_str().unwrap_or("."));
             let mut out: Vec<String> = Vec::new();
-            walk(&base, pattern, 0, &mut out);
+            walk(&base, pattern, &mut out);
             Ok(out.join("\n"))
         }
         "grep" => {
@@ -266,11 +268,6 @@ fn run(name: &str, args: &Value, root: Option<&str>) -> Result<String, String> {
             let base = resolve(root, args["path"].as_str().unwrap_or("."));
             let mut out: Vec<String> = Vec::new();
             grep_dir(&base, pattern, &mut out);
-            let total = out.len();
-            out.truncate(200);
-            if total > 200 {
-                out.push(format!("… 共 {total} 条，已截断"));
-            }
             Ok(out.join("\n"))
         }
         "bash" => {
@@ -292,17 +289,11 @@ fn run(name: &str, args: &Value, root: Option<&str>) -> Result<String, String> {
             if !stderr.is_empty() {
                 text.push_str(&stderr);
             }
-            if text.len() > 20000 {
-                text.truncate(20000);
-                text.push_str("\n… 输出过长，已截断");
-            }
             Ok(text)
         }
         "fetch" => {
             let url = args["url"].as_str().ok_or("缺 url")?;
-            let body = ureq_get(url)?;
-            let trimmed: String = body.chars().take(20000).collect();
-            Ok(trimmed)
+            ureq_get(url)
         }
         _ => Err(format!("未知工具 {name}")),
     }
@@ -316,24 +307,18 @@ fn ureq_get(url: &str) -> Result<String, String> {
     resp.text().map_err(|e| e.to_string())
 }
 
-fn walk(dir: &Path, pattern: &str, depth: usize, out: &mut Vec<String>) {
-    if depth > 6 || out.len() > 400 {
-        return;
-    }
+fn walk(dir: &Path, pattern: &str, out: &mut Vec<String>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') || name == "node_modules" || name == "target" {
-            continue;
-        }
         if glob_match(pattern, &name) {
             out.push(path.display().to_string());
         }
         if path.is_dir() {
-            walk(&path, pattern, depth + 1, out);
+            walk(&path, pattern, out);
         }
     }
 }
@@ -352,18 +337,11 @@ fn glob_match(pattern: &str, name: &str) -> bool {
 }
 
 fn grep_dir(dir: &Path, pattern: &str, out: &mut Vec<String>) {
-    if out.len() > 400 {
-        return;
-    }
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name.starts_with('.') || name == "node_modules" || name == "target" {
-            continue;
-        }
         if path.is_dir() {
             grep_dir(&path, pattern, out);
             continue;
@@ -374,9 +352,6 @@ fn grep_dir(dir: &Path, pattern: &str, out: &mut Vec<String>) {
         for (idx, line) in text.lines().enumerate() {
             if line.contains(pattern) {
                 out.push(format!("{}:{}:{}", path.display(), idx + 1, line.trim()));
-                if out.len() > 400 {
-                    return;
-                }
             }
         }
     }

@@ -126,15 +126,95 @@ function openAddProvider(onDone: () => void): void {
   ]);
 }
 
+function buildPromptPane(): HTMLElement {
+  const pane = el("div", "settings-pane");
+
+  const head = el("div", "settings-head");
+  head.appendChild(el("div", "settings-title", "提示词"));
+  pane.appendChild(head);
+
+  const area = el("textarea", "prompt-area");
+  area.value = state.settings.system_prompt;
+  pane.appendChild(area);
+
+  const bar = el("div", "settings-actions");
+  const save = el("button", "btn btn-primary", "保存");
+  save.addEventListener("click", async () => {
+    state.settings.system_prompt = area.value;
+    await api.saveSettings(state.settings);
+    save.textContent = "已保存";
+    setTimeout(() => {
+      save.textContent = "保存";
+    }, 1200);
+  });
+  bar.appendChild(save);
+  pane.appendChild(bar);
+
+  return pane;
+}
+
+function buildSendPane(): HTMLElement {
+  const pane = el("div", "settings-pane");
+
+  const head = el("div", "settings-head");
+  head.appendChild(el("div", "settings-title", "发送"));
+  pane.appendChild(head);
+
+  const row = el("div", "setting-row");
+  const textWrap = el("div", "setting-text");
+  textWrap.appendChild(el("div", "setting-name", "发送时剔除思考内容"));
+  textWrap.appendChild(
+    el("div", "setting-desc", "把历史 AI 思考在发送时置空，本地记录保留")
+  );
+  row.appendChild(textWrap);
+
+  const toggle = el("button", "switch");
+  if (state.settings.strip_thinking) toggle.classList.add("is-on");
+  toggle.addEventListener("click", async () => {
+    state.settings.strip_thinking = !state.settings.strip_thinking;
+    toggle.classList.toggle("is-on", state.settings.strip_thinking);
+    await api.saveSettings(state.settings);
+  });
+  row.appendChild(toggle);
+  pane.appendChild(row);
+
+  return pane;
+}
+
 export function buildSettings(onChange: () => void): HTMLElement {
   const wrap = el("div", "settings");
 
   const side = el("div", "settings-side");
-  const item = el("button", "settings-tab", "模型供应");
-  item.classList.add("is-active");
-  side.appendChild(item);
+  const tabs: Array<[string, () => HTMLElement]> = [
+    ["模型供应", () => buildProviderPane(onChange)],
+    ["提示词", buildPromptPane],
+    ["发送", buildSendPane],
+  ];
+
+  const paneHost = el("div", "settings-pane-host");
+
+  const activate = (index: number): void => {
+    side.querySelectorAll(".settings-tab").forEach((t, i) => {
+      t.classList.toggle("is-active", i === index);
+    });
+    paneHost.replaceChildren(tabs[index][1]());
+  };
+
+  tabs.forEach(([label], i) => {
+    const item = el("button", "settings-tab", label);
+    if (i === 0) item.classList.add("is-active");
+    item.addEventListener("click", () => activate(i));
+    side.appendChild(item);
+  });
   wrap.appendChild(side);
 
+  paneHost.appendChild(tabs[0][1]());
+  wrap.appendChild(paneHost);
+
+  return wrap;
+}
+
+function buildProviderPane(onChange: () => void): HTMLElement {
   const pane = el("div", "settings-pane");
 
   const head = el("div", "settings-head");
@@ -174,6 +254,5 @@ export function buildSettings(onChange: () => void): HTMLElement {
   });
   pane.appendChild(grid);
 
-  wrap.appendChild(pane);
-  return wrap;
+  return pane;
 }
