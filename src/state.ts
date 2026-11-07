@@ -48,7 +48,14 @@ export function currentProvider(): Provider | null {
 }
 
 export function sessionsOf(projectId: string): Session[] {
-  return state.sessions.filter((s) => s.project_id === projectId);
+  return state.sessions
+    .filter((s) => s.project_id === projectId)
+    .sort((a, b) => b.created_at - a.created_at);
+}
+
+export function newestSessionOf(projectId: string): Session | null {
+  const list = sessionsOf(projectId);
+  return list.length > 0 ? list[0] : null;
 }
 
 const LAST_KEY = "hyperon.lastSelection";

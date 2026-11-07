@@ -105,8 +105,39 @@ fn create_project(app: AppHandle, name: String, dirs: Vec<String>) -> Result<Pro
         builtin: false,
     };
     db.projects.push(project.clone());
+    let last = db.projects.len() - 1;
+    let moved = db.projects.remove(last);
+    let insert_at = if db.projects.first().map(|p| p.builtin).unwrap_or(false) {
+        1
+    } else {
+        0
+    };
+    db.projects.insert(insert_at.min(db.projects.len()), moved);
     store::save(&app, &db);
     Ok(project)
+}
+
+#[tauri::command]
+fn reorder_projects(app: AppHandle, ids: Vec<String>) {
+    let mut db = store::load(&app);
+    let mut ordered: Vec<Project> = Vec::new();
+    for id in &ids {
+        if let Some(pos) = db.projects.iter().position(|p| &p.id == id) {
+            ordered.push(db.projects.remove(pos));
+        }
+    }
+    for p in db.projects.drain(..) {
+        ordered.push(p);
+    }
+    let builtin = ordered.iter().position(|p| p.builtin);
+    if let Some(pos) = builtin {
+        if pos != 0 {
+            let p = ordered.remove(pos);
+            ordered.insert(0, p);
+        }
+    }
+    db.projects = ordered;
+    store::save(&app, &db);
 }
 
 #[tauri::command]
@@ -195,6 +226,49 @@ fn get_messages(app: AppHandle, session_id: String) -> Result<Vec<Message>, Stri
 #[tauri::command]
 fn get_messages_sync(app: AppHandle, session_id: String) -> Result<Vec<Message>, String> {
     get_messages(app, session_id)
+}
+
+fn estimate_tokens(text: &str) -> u64 {
+    let mut cjk: u64 = 0;
+    let mut other: u64 = 0;
+    for ch in text.chars() {
+        if ('\u{4e00}'..='\u{9fff}').contains(&ch)
+            || ('\u{3040}'..='\u{30ff}').contains(&ch)
+            || ('\u{ac00}'..='\u{d7af}').contains(&ch)
+        {
+            cjk += 1;
+        } else {
+            other += 1;
+        }
+    }
+    cjk + (other + 3) / 4
+}
+
+#[tauri::command]
+fn estimate_context(
+    session_id: String,
+    provider_id: String,
+    app: AppHandle,
+    system_prompt: String,
+    strip_thinking: bool,
+) -> Result<(u64, u64), String> {
+    let db = store::load(&app);
+    let mut total = estimate_tokens(&system_prompt);
+    for m in db.messages.iter().filter(|m| m.session_id == session_id) {
+        total += estimate_tokens(&m.content);
+        if m.role == "assistant" && !strip_thinking {
+            total += estimate_tokens(&m.reasoning);
+        }
+        total += 4;
+    }
+    let window = db
+        .providers
+        .iter()
+        .find(|p| p.id == provider_id)
+        .or_else(|| db.providers.first())
+        .map(|p| presets::context_window(&p.model))
+        .unwrap_or(200_000);
+    Ok((total, window))
 }
 
 #[tauri::command]
@@ -330,12 +404,14 @@ pub fn run() {
             delete_provider,
             create_project,
             update_project,
+            reorder_projects,
             delete_project,
             create_session,
             update_session,
             delete_session,
             get_messages,
             get_messages_sync,
+            estimate_context,
             approve,
             send_message
         ])

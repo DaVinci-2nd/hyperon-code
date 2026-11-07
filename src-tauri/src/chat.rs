@@ -28,6 +28,11 @@ pub enum StreamEvent {
         tool: String,
         ok: bool,
     },
+    Usage {
+        prompt_tokens: u64,
+        cached_tokens: u64,
+        context_window: u64,
+    },
     Done,
     Error { message: String },
 }
@@ -351,6 +356,7 @@ fn build_openai_body(
         "model": provider.model,
         "messages": list,
         "stream": true,
+        "stream_options": { "include_usage": true },
         "tools": tools::openai_tools(),
     });
 
@@ -423,6 +429,23 @@ async fn stream_openai(
             if let Some(err) = value["error"]["message"].as_str() {
                 return Err(err.to_string());
             }
+
+            let usage = &value["usage"];
+            if !usage.is_null() {
+                let prompt = usage["prompt_tokens"].as_u64().unwrap_or(0);
+                let cached = usage["prompt_tokens_details"]["cached_tokens"]
+                    .as_u64()
+                    .or_else(|| usage["prompt_cache_hit_tokens"].as_u64())
+                    .unwrap_or(0);
+                if prompt > 0 {
+                    sink(StreamEvent::Usage {
+                        prompt_tokens: prompt,
+                        cached_tokens: cached,
+                        context_window: presets::context_window(&provider.model),
+                    });
+                }
+            }
+
             let delta = &value["choices"][0]["delta"];
 
             if let Some(reasoning) = delta["reasoning_content"].as_str() {
@@ -602,6 +625,34 @@ async fn stream_anthropic(
             };
 
             match value["type"].as_str() {
+                Some("message_start") => {
+                    let usage = &value["message"]["usage"];
+                    let input = usage["input_tokens"].as_u64().unwrap_or(0);
+                    let cached = usage["cache_read_input_tokens"].as_u64().unwrap_or(0);
+                    let created = usage["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+                    let total = input + cached + created;
+                    if total > 0 {
+                        sink(StreamEvent::Usage {
+                            prompt_tokens: total,
+                            cached_tokens: cached,
+                            context_window: presets::context_window(&provider.model),
+                        });
+                    }
+                }
+                Some("message_delta") => {
+                    let usage = &value["usage"];
+                    let input = usage["input_tokens"].as_u64().unwrap_or(0);
+                    let cached = usage["cache_read_input_tokens"].as_u64().unwrap_or(0);
+                    let created = usage["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+                    let total = input + cached + created;
+                    if total > 0 {
+                        sink(StreamEvent::Usage {
+                            prompt_tokens: total,
+                            cached_tokens: cached,
+                            context_window: presets::context_window(&provider.model),
+                        });
+                    }
+                }
                 Some("content_block_start") => {
                     if value["content_block"]["type"].as_str() == Some("tool_use") {
                         current = Some((
@@ -766,6 +817,18 @@ async fn stream_gemini(
             let Ok(value) = serde_json::from_str::<Value>(data.trim()) else {
                 continue;
             };
+            let usage = &value["usageMetadata"];
+            if !usage.is_null() {
+                let prompt = usage["promptTokenCount"].as_u64().unwrap_or(0);
+                let cached = usage["cachedContentTokenCount"].as_u64().unwrap_or(0);
+                if prompt > 0 {
+                    sink(StreamEvent::Usage {
+                        prompt_tokens: prompt,
+                        cached_tokens: cached,
+                        context_window: presets::context_window(&provider.model),
+                    });
+                }
+            }
             let Some(parts) = value["candidates"][0]["content"]["parts"].as_array() else {
                 continue;
             };

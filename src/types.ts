@@ -92,5 +92,18 @@ export type StreamEvent =
       tool: string;
       ok: boolean;
     }
+  | {
+      type: "usage";
+      prompt_tokens: number;
+      cached_tokens: number;
+      context_window: number;
+    }
   | { type: "done" }
   | { type: "error"; message: string };
+
+export interface UsageStat {
+  used: number;
+  window: number;
+  cached: number;
+  hitRate: number | null;
+}

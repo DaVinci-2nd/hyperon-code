@@ -2,7 +2,7 @@ import "./styles.css";
 import * as api from "./api";
 import { state, recallSelection, rememberSelection } from "./state";
 import { bindFollow, buildMessages, mountJumpButton, resetFollow } from "./ui/chat";
-import { buildComposer } from "./ui/composer";
+import { buildComposer, refreshUsageDisplay } from "./ui/composer";
 import { el } from "./ui/dom";
 import { buildSettings } from "./ui/settings";
 import { buildSidebar } from "./ui/sidebar";
@@ -105,6 +105,7 @@ function renderMessages(): void {
     resetFollow();
     settleScrollToBottom();
   }
+  if (switched) refreshUsageDisplay();
   requestAnimationFrame(bindFollow);
 }
 
@@ -172,7 +173,9 @@ async function boot(): Promise<void> {
     rememberedProject ?? (builtin ? builtin.id : state.projects[0]?.id ?? null);
 
   const list = state.currentProjectId
-    ? state.sessions.filter((s) => s.project_id === state.currentProjectId)
+    ? state.sessions
+        .filter((s) => s.project_id === state.currentProjectId)
+        .sort((a, b) => b.created_at - a.created_at)
     : [];
   const rememberedSession =
     last.session && list.some((s) => s.id === last.session) ? last.session : null;

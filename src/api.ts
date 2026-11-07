@@ -33,6 +33,10 @@ export function updateProject(id: string, name: string, dirs: string[]): Promise
   return invoke("update_project", { id, name, dirs });
 }
 
+export function reorderProjects(ids: string[]): Promise<void> {
+  return invoke("reorder_projects", { ids });
+}
+
 export function deleteProject(id: string): Promise<void> {
   return invoke("delete_project", { id });
 }
@@ -55,6 +59,20 @@ export function getMessages(sessionId: string): Promise<Message[]> {
 
 export function approve(id: string, allowed: boolean): Promise<boolean> {
   return invoke<boolean>("approve", { id, allowed });
+}
+
+export function estimateContext(
+  sessionId: string,
+  providerId: string,
+  systemPrompt: string,
+  stripThinking: boolean
+): Promise<[number, number]> {
+  return invoke<[number, number]>("estimate_context", {
+    sessionId,
+    providerId,
+    systemPrompt,
+    stripThinking,
+  });
 }
 
 export function sendMessage(

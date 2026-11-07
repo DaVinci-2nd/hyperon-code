@@ -214,6 +214,22 @@ export function buildSidebar(onChange: () => void): HTMLElement {
   projectsSection.appendChild(projectHead);
 
   const projectList = el("div", "sidebar-list");
+
+  const moveProject = async (id: string, delta: number): Promise<void> => {
+    const ids = state.projects.map((p) => p.id);
+    const from = ids.indexOf(id);
+    if (from < 0) return;
+    let to = from + delta;
+    const builtinIndex = state.projects.findIndex((p) => p.builtin);
+    if (builtinIndex >= 0 && to <= builtinIndex) to = builtinIndex + 1;
+    if (to < 0 || to >= ids.length) return;
+    ids.splice(from, 1);
+    ids.splice(to, 0, id);
+    await api.reorderProjects(ids);
+    await reload();
+    onChange();
+  };
+
   state.projects.forEach((p) => {
     const item = el("button", "list-item", p.name);
     if (p.id === state.currentProjectId) item.classList.add("is-active");
@@ -229,6 +245,8 @@ export function buildSidebar(onChange: () => void): HTMLElement {
       projectList.appendChild(
         attachItem(item, [
           { label: "修改", run: () => openEditProject(p, onChange) },
+          { label: "上移", run: () => void moveProject(p.id, -1) },
+          { label: "下移", run: () => void moveProject(p.id, 1) },
           {
             label: "删除",
             run: () =>

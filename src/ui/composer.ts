@@ -18,6 +18,48 @@ const THINK_LABEL: Record<string, string> = {
   max: "思考：最高",
 };
 
+let usageTagEl: HTMLElement | null = null;
+
+function fmtCount(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
+  return String(n);
+}
+
+function paintUsageTag(
+  tag: HTMLElement,
+  used: number,
+  window: number,
+  cached: number | null
+): void {
+  const pct = window > 0 ? (used / window) * 100 : 0;
+  const hit = cached === null || used <= 0 ? null : (cached / used) * 100;
+  const hitText = hit === null ? "命中 —" : `命中 ${hit.toFixed(0)}%`;
+  tag.textContent = `${hitText} · ${fmtCount(used)}/${fmtCount(window)} ${pct.toFixed(1)}%`;
+}
+
+async function refreshUsageInto(tag: HTMLElement): Promise<void> {
+  if (!state.currentSessionId) {
+    tag.textContent = "";
+    return;
+  }
+  try {
+    const [used, window] = await api.estimateContext(
+      state.currentSessionId,
+      state.currentProviderId,
+      state.settings.system_prompt,
+      state.settings.strip_thinking
+    );
+    paintUsageTag(tag, used, window, null);
+  } catch {
+    tag.textContent = "";
+  }
+}
+
+export function refreshUsageDisplay(): void {
+  if (usageTagEl) void refreshUsageInto(usageTagEl);
+}
+
 export function buildComposer(onDone: () => void): HTMLElement {
   const box = el("div", "composer");
 
@@ -62,8 +104,22 @@ export function buildComposer(onDone: () => void): HTMLElement {
 
   bar.appendChild(el("div", "composer-spacer"));
 
+  const usageTag = el("div", "usage-tag");
+  bar.appendChild(usageTag);
+  usageTagEl = usageTag;
+
   const send = el("button", "composer-send", "发送");
   bar.appendChild(send);
+
+  const paint = (used: number, window: number, cached: number | null): void => {
+    paintUsageTag(usageTag, used, window, cached);
+  };
+
+  const refresh = async (): Promise<void> => {
+    await refreshUsageInto(usageTag);
+  };
+
+  void refresh();
 
   const doSend = async (): Promise<void> => {
     const text = input.value.trim();
@@ -146,6 +202,12 @@ export function buildComposer(onDone: () => void): HTMLElement {
           });
           current = null;
           schedule(parts.length - 1);
+        } else if (event.type === "usage") {
+          paint(
+            event.prompt_tokens,
+            event.context_window,
+            event.cached_tokens
+          );
         } else if (event.type === "error") {
           pushPart("text");
           current!.text += `\n\n请求失败：${event.message}`;
@@ -163,6 +225,7 @@ export function buildComposer(onDone: () => void): HTMLElement {
       send.removeAttribute("disabled");
       send.textContent = "发送";
       onDone();
+      void refresh();
     }
   };
 
