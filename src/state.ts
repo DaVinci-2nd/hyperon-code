@@ -50,3 +50,33 @@ export function currentProvider(): Provider | null {
 export function sessionsOf(projectId: string): Session[] {
   return state.sessions.filter((s) => s.project_id === projectId);
 }
+
+const LAST_KEY = "hyperon.lastSelection";
+
+export function rememberSelection(): void {
+  try {
+    localStorage.setItem(
+      LAST_KEY,
+      JSON.stringify({
+        project: state.currentProjectId,
+        session: state.currentSessionId,
+      })
+    );
+  } catch {
+    /* 忽略 */
+  }
+}
+
+export function recallSelection(): { project: string | null; session: string | null } {
+  try {
+    const raw = localStorage.getItem(LAST_KEY);
+    if (!raw) return { project: null, session: null };
+    const parsed = JSON.parse(raw) as { project?: string | null; session?: string | null };
+    return {
+      project: parsed.project ?? null,
+      session: parsed.session ?? null,
+    };
+  } catch {
+    return { project: null, session: null };
+  }
+}

@@ -235,8 +235,6 @@ select {
 .msg {
   margin-bottom: 14px;
   display: flex;
-  content-visibility: auto;
-  contain-intrinsic-size: auto 96px;
 }
 
 .load-more {
@@ -649,6 +647,101 @@ select {
 
 .list-item.is-builtin {
   color: var(--muted);
+}
+
+.list-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+
+.list-row > .list-item {
+  flex: 1;
+  min-width: 0;
+}
+
+.row-more {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 20px;
+  height: 20px;
+  line-height: 1;
+  border-radius: 4px;
+  color: var(--muted);
+  opacity: 0;
+  font-size: 14px;
+}
+
+.list-row:hover .row-more {
+  opacity: 1;
+}
+
+.row-more:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.row-menu {
+  position: fixed;
+  z-index: 60;
+  min-width: 96px;
+  padding: 4px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--panel);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
+}
+
+.row-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 6px 10px;
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.row-menu-item:hover {
+  background: var(--hover);
+}
+
+.confirm-text {
+  line-height: 1.6;
+  color: var(--text);
+}
+
+.composer-host {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.jump-bottom {
+  position: absolute;
+  right: 22px;
+  top: -34px;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 14px;
+  line-height: 1;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.24);
+  transition: opacity 0.12s ease;
+}
+
+.jump-bottom:hover {
+  color: var(--text);
+  background: var(--hover);
+}
+
+.jump-bottom.is-hidden {
+  opacity: 0;
+  pointer-events: none;
 }
 
 .settings {

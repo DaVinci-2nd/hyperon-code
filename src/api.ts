@@ -29,12 +29,20 @@ export function createProject(name: string, dirs: string[]): Promise<Project> {
   return invoke<Project>("create_project", { name, dirs });
 }
 
+export function updateProject(id: string, name: string, dirs: string[]): Promise<void> {
+  return invoke("update_project", { id, name, dirs });
+}
+
 export function deleteProject(id: string): Promise<void> {
   return invoke("delete_project", { id });
 }
 
 export function createSession(projectId: string): Promise<Session> {
   return invoke<Session>("create_session", { projectId });
+}
+
+export function updateSession(id: string, title: string): Promise<void> {
+  return invoke("update_session", { id, title });
 }
 
 export function deleteSession(id: string): Promise<void> {

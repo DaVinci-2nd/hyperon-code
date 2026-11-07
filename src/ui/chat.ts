@@ -142,9 +142,16 @@ export function buildMessages(): HTMLElement {
 
 let scrollPending = false;
 let followTail = true;
+let jumpButton: HTMLElement | null = null;
 
 export function resetFollow(): void {
   followTail = true;
+  syncJumpButton(true);
+}
+
+function syncJumpButton(atBottom: boolean): void {
+  if (!jumpButton) return;
+  jumpButton.classList.toggle("is-hidden", atBottom);
 }
 
 export function requestScroll(): void {
@@ -155,20 +162,40 @@ export function requestScroll(): void {
     if (!followTail) return;
     const box = document.getElementById("messages");
     if (box) box.scrollTop = box.scrollHeight;
+    syncJumpButton(true);
   });
 }
 
 export function bindFollow(): void {
   const box = document.getElementById("messages");
   if (!box) return;
-  box.addEventListener(
-    "scroll",
-    () => {
-      const gap = box.scrollHeight - box.scrollTop - box.clientHeight;
-      followTail = gap < 80;
-    },
-    { passive: true }
-  );
+  const update = (): void => {
+    const gap = box.scrollHeight - box.scrollTop - box.clientHeight;
+    followTail = gap < 80;
+    syncJumpButton(gap < 80);
+  };
+  box.addEventListener("scroll", update, { passive: true });
+  update();
+}
+
+export function buildJumpButton(): HTMLElement {
+  const btn = el("button", "jump-bottom", "↓");
+  btn.title = "滚动到底部";
+  btn.classList.add("is-hidden");
+  btn.addEventListener("click", () => {
+    const box = document.getElementById("messages");
+    if (!box) return;
+    box.scrollTop = box.scrollHeight;
+    followTail = true;
+    syncJumpButton(true);
+  });
+  jumpButton = btn;
+  return btn;
+}
+
+export function mountJumpButton(host: HTMLElement): void {
+  const btn = buildJumpButton();
+  host.appendChild(btn);
 }
 
 export function appendStreamingRow(): HTMLElement | null {

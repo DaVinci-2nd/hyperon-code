@@ -1,7 +1,7 @@
 import "./styles.css";
 import * as api from "./api";
-import { state } from "./state";
-import { bindFollow, buildMessages } from "./ui/chat";
+import { state, recallSelection, rememberSelection } from "./state";
+import { bindFollow, buildMessages, mountJumpButton, resetFollow } from "./ui/chat";
 import { buildComposer } from "./ui/composer";
 import { el } from "./ui/dom";
 import { buildSettings } from "./ui/settings";
@@ -16,8 +16,15 @@ function buildMain(): HTMLElement {
   const session = state.sessions.find((s) => s.id === state.currentSessionId);
   main.appendChild(el("div", "main-header", session ? session.title : "未选择会话"));
   main.appendChild(buildMessages());
-  main.appendChild(buildComposer(render));
-  requestAnimationFrame(bindFollow);
+
+  const composerHost = el("div", "composer-host");
+  composerHost.appendChild(buildComposer(render));
+  main.appendChild(composerHost);
+
+  requestAnimationFrame(() => {
+    mountJumpButton(composerHost);
+    bindFollow();
+  });
   return main;
 }
 
@@ -67,17 +74,37 @@ function renderSidebar(): void {
   if (old) old.replaceWith(buildSidebar(render));
 }
 
+let lastRenderedSession: string | null = null;
+
+function settleScrollToBottom(): void {
+  const apply = (): void => {
+    const el = document.getElementById("messages");
+    if (el) el.scrollTop = el.scrollHeight;
+  };
+  apply();
+  requestAnimationFrame(() => {
+    apply();
+    requestAnimationFrame(apply);
+  });
+}
+
 function renderMessages(): void {
   const old = root.querySelector(".messages");
   if (!old) {
     render();
     return;
   }
-  const atBottom =
-    old.scrollHeight - old.scrollTop - old.clientHeight < 80;
+  const switched = lastRenderedSession !== state.currentSessionId;
+  const atBottom = old.scrollHeight - old.scrollTop - old.clientHeight < 80;
+  lastRenderedSession = state.currentSessionId;
+
   const next = buildMessages();
   old.replaceWith(next);
-  if (atBottom) next.scrollTop = next.scrollHeight;
+
+  if (switched || atBottom) {
+    resetFollow();
+    settleScrollToBottom();
+  }
   requestAnimationFrame(bindFollow);
 }
 
@@ -135,13 +162,22 @@ async function boot(): Promise<void> {
 
   state.presets = await api.listPresets();
 
+  const last = recallSelection();
+  const rememberedProject =
+    last.project && state.projects.some((p) => p.id === last.project)
+      ? last.project
+      : null;
   const builtin = state.projects.find((p) => p.builtin);
-  state.currentProjectId = builtin ? builtin.id : state.projects[0]?.id ?? null;
+  state.currentProjectId =
+    rememberedProject ?? (builtin ? builtin.id : state.projects[0]?.id ?? null);
 
   const list = state.currentProjectId
     ? state.sessions.filter((s) => s.project_id === state.currentProjectId)
     : [];
-  state.currentSessionId = list.length > 0 ? list[0].id : null;
+  const rememberedSession =
+    last.session && list.some((s) => s.id === last.session) ? last.session : null;
+  state.currentSessionId =
+    rememberedSession ?? (list.length > 0 ? list[0].id : null);
   state.messages = state.currentSessionId
     ? await api.getMessages(state.currentSessionId)
     : [];
@@ -150,7 +186,16 @@ async function boot(): Promise<void> {
     state.currentProviderId = state.providers[0].id;
   }
 
+  rememberSelection();
   render();
+  lastRenderedSession = state.currentSessionId;
+  requestAnimationFrame(() => {
+    const box = document.getElementById("messages");
+    if (!box) return;
+    resetFollow();
+    settleScrollToBottom();
+    bindFollow();
+  });
 }
 
 void boot();

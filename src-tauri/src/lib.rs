@@ -110,20 +110,35 @@ fn create_project(app: AppHandle, name: String, dirs: Vec<String>) -> Result<Pro
 }
 
 #[tauri::command]
+fn update_project(app: AppHandle, id: String, name: String, dirs: Vec<String>) -> Result<(), String> {
+    if id == BUILTIN_PROJECT_ID {
+        return Err("默认工程不可修改".to_string());
+    }
+    let mut db = store::load(&app);
+    if let Some(p) = db.projects.iter_mut().find(|p| p.id == id) {
+        p.name = if name.trim().is_empty() {
+            "未命名工程".to_string()
+        } else {
+            name.trim().to_string()
+        };
+        p.dirs = dirs;
+    }
+    store::save(&app, &db);
+    Ok(())
+}
+
+#[tauri::command]
 fn delete_project(app: AppHandle, id: String) -> Result<(), String> {
     if id == BUILTIN_PROJECT_ID {
         return Err("默认工程不可删除".to_string());
     }
     let mut db = store::load(&app);
     db.projects.retain(|p| p.id != id);
-    let gone: Vec<String> = db
-        .sessions
-        .iter()
-        .filter(|s| s.project_id == id)
-        .map(|s| s.id.clone())
-        .collect();
-    db.sessions.retain(|s| s.project_id != id);
-    db.messages.retain(|m| !gone.contains(&m.session_id));
+    for s in db.sessions.iter_mut() {
+        if s.project_id == id {
+            s.project_id = BUILTIN_PROJECT_ID.to_string();
+        }
+    }
     store::save(&app, &db);
     Ok(())
 }
@@ -148,6 +163,15 @@ fn create_session(app: AppHandle, project_id: String) -> Result<Session, String>
     db.sessions.push(session.clone());
     store::save(&app, &db);
     Ok(session)
+}
+
+#[tauri::command]
+fn update_session(app: AppHandle, id: String, title: String) {
+    let mut db = store::load(&app);
+    if let Some(s) = db.sessions.iter_mut().find(|s| s.id == id) {
+        s.title = title.trim().to_string();
+    }
+    store::save(&app, &db);
 }
 
 #[tauri::command]
@@ -305,8 +329,10 @@ pub fn run() {
             update_provider,
             delete_provider,
             create_project,
+            update_project,
             delete_project,
             create_session,
+            update_session,
             delete_session,
             get_messages,
             get_messages_sync,

@@ -1,6 +1,6 @@
 import * as api from "../api";
-import { state, sessionsOf } from "../state";
-import type { Message } from "../types";
+import { state, sessionsOf, rememberSelection } from "../state";
+import type { Message, Project, Session } from "../types";
 import { el, field, openModal } from "./dom";
 
 async function refreshSessions(projectId: string): Promise<void> {
@@ -21,50 +21,132 @@ async function reload(): Promise<void> {
   state.providers = snap.providers;
 }
 
-function openNewProject(onDone: () => void): void {
+function projectForm(initialName: string, initialDirs: string[]): {
+  body: HTMLElement;
+  read: () => { name: string; dirs: string[] };
+} {
   const body = el("div", "form");
 
   const nameInput = el("input", "input");
   nameInput.placeholder = "工程名称";
+  nameInput.value = initialName;
   body.appendChild(field("名称", nameInput));
 
   const dirWrap = el("div", "dir-list");
-  const addDir = el("button", "btn", "＋ 添加目录");
-  const collect = (): string[] => {
-    const out: string[] = [];
-    dirWrap.querySelectorAll<HTMLInputElement>("input").forEach((i) => {
-      const v = i.value.trim();
-      if (v) out.push(v);
-    });
-    return out;
-  };
-  addDir.addEventListener("click", () => {
+  const addRow = (value: string): void => {
     const row = el("div", "dir-row");
     const input = el("input", "input");
     input.placeholder = "工作目录路径";
+    input.value = value;
     const drop = el("button", "btn", "移除");
     drop.addEventListener("click", () => row.remove());
     row.appendChild(input);
     row.appendChild(drop);
     dirWrap.appendChild(row);
-  });
+  };
+  initialDirs.forEach(addRow);
+
+  const addDir = el("button", "btn", "＋ 添加目录");
+  addDir.addEventListener("click", () => addRow(""));
 
   body.appendChild(field("工作目录", dirWrap));
   body.appendChild(addDir);
 
-  openModal("新建工程", body, [
+  const read = (): { name: string; dirs: string[] } => {
+    const dirs: string[] = [];
+    dirWrap.querySelectorAll<HTMLInputElement>("input").forEach((i) => {
+      const v = i.value.trim();
+      if (v) dirs.push(v);
+    });
+    return { name: nameInput.value, dirs };
+  };
+
+  return { body, read };
+}
+
+function openNewProject(onDone: () => void): void {
+  const form = projectForm("", []);
+  openModal("新建工程", form.body, [
     { label: "取消", onClick: (close) => close() },
     {
       label: "创建",
       primary: true,
       onClick: async (close) => {
-        const created = await api.createProject(nameInput.value, collect());
+        const { name, dirs } = form.read();
+        const created = await api.createProject(name, dirs);
         await reload();
         state.currentProjectId = created.id;
         state.currentSessionId = null;
         state.messages = [];
         close();
         onDone();
+      },
+    },
+  ]);
+}
+
+function openEditProject(project: Project, onDone: () => void): void {
+  const form = projectForm(project.name, project.dirs);
+  openModal("修改工程", form.body, [
+    { label: "取消", onClick: (close) => close() },
+    {
+      label: "保存",
+      primary: true,
+      onClick: async (close) => {
+        const { name, dirs } = form.read();
+        await api.updateProject(project.id, name, dirs);
+        await reload();
+        close();
+        onDone();
+      },
+    },
+  ]);
+}
+
+function openEditSession(session: Session, onDone: () => void): void {
+  const body = el("div", "form");
+  const input = el("input", "input");
+  input.value = session.title;
+  input.placeholder = "会话名称";
+  body.appendChild(field("名称", input));
+
+  openModal("修改会话", body, [
+    { label: "取消", onClick: (close) => close() },
+    {
+      label: "保存",
+      primary: true,
+      onClick: async (close) => {
+        await api.updateSession(session.id, input.value);
+        await reload();
+        const current = state.sessions.find((s) => s.id === state.currentSessionId);
+        if (current) {
+          close();
+          onDone();
+          return;
+        }
+        close();
+        onDone();
+      },
+    },
+  ]);
+}
+
+function openConfirm(
+  title: string,
+  message: string,
+  onOk: () => Promise<void>
+): void {
+  const body = el("div", "form");
+  body.appendChild(el("div", "confirm-text", message));
+
+  openModal(title, body, [
+    { label: "取消", onClick: (close) => close() },
+    {
+      label: "删除",
+      primary: true,
+      onClick: async (close) => {
+        await onOk();
+        close();
       },
     },
   ]);
@@ -78,6 +160,45 @@ async function openNewSession(onDone: () => void): Promise<void> {
   state.currentSessionId = created.id;
   state.messages = [];
   onDone();
+}
+
+function attachItem(
+  item: HTMLElement,
+  actions: Array<{ label: string; run: () => void }>
+): HTMLElement {
+  const wrap = el("div", "list-row");
+  wrap.appendChild(item);
+
+  const more = el("button", "row-more", "…");
+  more.addEventListener("click", (e) => {
+    e.stopPropagation();
+    document.querySelectorAll(".row-menu").forEach((n) => n.remove());
+    const menu = el("div", "row-menu");
+    actions.forEach((a) => {
+      const btn = el("button", "row-menu-item", a.label);
+      btn.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        menu.remove();
+        a.run();
+      });
+      menu.appendChild(btn);
+    });
+    document.body.appendChild(menu);
+    const rect = more.getBoundingClientRect();
+    menu.style.left = `${rect.right + 4}px`;
+    menu.style.top = `${rect.top}px`;
+
+    const close = (ev: MouseEvent): void => {
+      if (!menu.contains(ev.target as Node)) {
+        menu.remove();
+        document.removeEventListener("click", close);
+      }
+    };
+    setTimeout(() => document.addEventListener("click", close), 0);
+  });
+  wrap.appendChild(more);
+
+  return wrap;
 }
 
 export function buildSidebar(onChange: () => void): HTMLElement {
@@ -100,9 +221,42 @@ export function buildSidebar(onChange: () => void): HTMLElement {
     item.addEventListener("click", async () => {
       state.currentProjectId = p.id;
       await refreshSessions(p.id);
+      rememberSelection();
       onChange();
     });
-    projectList.appendChild(item);
+
+    if (!p.builtin) {
+      projectList.appendChild(
+        attachItem(item, [
+          { label: "修改", run: () => openEditProject(p, onChange) },
+          {
+            label: "删除",
+            run: () =>
+              openConfirm(
+                "删除工程",
+                `确定删除「${p.name}」？工程内的会话会移到默认工程，不会删除。`,
+                async () => {
+                  await api.deleteProject(p.id);
+                  await reload();
+                  if (state.currentProjectId === p.id) {
+                    const builtin = state.projects.find((x) => x.builtin);
+                    state.currentProjectId = builtin ? builtin.id : null;
+                    if (state.currentProjectId) {
+                      await refreshSessions(state.currentProjectId);
+                    } else {
+                      state.currentSessionId = null;
+                      state.messages = [];
+                    }
+                  }
+                  onChange();
+                }
+              ),
+          },
+        ])
+      );
+    } else {
+      projectList.appendChild(item);
+    }
   });
   projectsSection.appendChild(projectList);
   side.appendChild(projectsSection);
@@ -137,9 +291,31 @@ export function buildSidebar(onChange: () => void): HTMLElement {
       item.addEventListener("click", async () => {
         state.currentSessionId = s.id;
         state.messages = await api.getMessages(s.id);
+        rememberSelection();
         onChange();
       });
-      sessionList.appendChild(item);
+
+      sessionList.appendChild(
+        attachItem(item, [
+          { label: "修改", run: () => openEditSession(s, onChange) },
+          {
+            label: "删除",
+            run: () =>
+              openConfirm("删除会话", `确定删除「${s.title}」？`, async () => {
+                await api.deleteSession(s.id);
+                await reload();
+                if (state.currentSessionId === s.id) {
+                  const rest = sessionsOf(s.project_id);
+                  state.currentSessionId = rest.length > 0 ? rest[0].id : null;
+                  state.messages = state.currentSessionId
+                    ? await api.getMessages(state.currentSessionId)
+                    : [];
+                }
+                onChange();
+              }),
+          },
+        ])
+      );
     });
   }
   sessionsSection.appendChild(sessionList);
