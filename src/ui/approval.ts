@@ -15,18 +15,27 @@ function renderDiff(detail: string): HTMLElement {
     box.appendChild(el("div", "diff-empty", "无差异"));
     return box;
   }
+  let firstChange: HTMLElement | null = null;
   detail.split("\n").forEach((line) => {
     const row = el("div", "diff-line");
-    if (line.startsWith("+ ")) {
+    if (line.startsWith("+")) {
       row.classList.add("is-add");
-    } else if (line.startsWith("- ")) {
+      if (!firstChange) firstChange = row;
+    } else if (line.startsWith("-")) {
       row.classList.add("is-del");
+      if (!firstChange) firstChange = row;
     } else {
       row.classList.add("is-meta");
     }
-    row.textContent = line;
+    row.textContent = line.length > 0 ? line : " ";
     box.appendChild(row);
   });
+  if (firstChange) {
+    requestAnimationFrame(() => {
+      const target = firstChange as HTMLElement;
+      box.scrollTop = Math.max(0, target.offsetTop - box.clientHeight / 3);
+    });
+  }
   return box;
 }
 

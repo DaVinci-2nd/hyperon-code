@@ -1,5 +1,5 @@
 import * as api from "../api";
-import { state } from "../state";
+import { state, rememberComposer } from "../state";
 import type { Part } from "../types";
 import { openApproval } from "./approval";
 import {
@@ -19,6 +19,12 @@ const THINK_LABEL: Record<string, string> = {
 };
 
 let usageTagEl: HTMLElement | null = null;
+let lastUsage: {
+  sessionId: string;
+  used: number;
+  window: number;
+  cached: number;
+} | null = null;
 
 function fmtCount(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -30,12 +36,18 @@ function paintUsageTag(
   tag: HTMLElement,
   used: number,
   window: number,
-  cached: number | null
+  cached: number | null | undefined,
+  hitBase: number
 ): void {
   const pct = window > 0 ? (used / window) * 100 : 0;
-  const hit = cached === null || used <= 0 ? null : (cached / used) * 100;
-  const hitText = hit === null ? "命中 —" : `命中 ${hit.toFixed(0)}%`;
-  tag.textContent = `${hitText} · ${fmtCount(used)}/${fmtCount(window)} ${pct.toFixed(1)}%`;
+  const hasCached = cached !== null && cached !== undefined;
+  const hit = hasCached && hitBase > 0 ? ((cached as number) / hitBase) * 100 : null;
+  const usageText = `${fmtCount(used)}/${fmtCount(window)} ${pct.toFixed(1)}%`;
+  const hitText =
+    hit === null
+      ? ""
+      : `命中 ${hit > 99 ? Math.min(hit, 99.9).toFixed(1) : hit.toFixed(0)}% · `;
+  tag.textContent = `${hitText}${usageText}`;
 }
 
 async function refreshUsageInto(tag: HTMLElement): Promise<void> {
@@ -44,13 +56,21 @@ async function refreshUsageInto(tag: HTMLElement): Promise<void> {
     return;
   }
   try {
-    const [used, window] = await api.estimateContext(
+    const [used, window, stored] = await api.estimateContext(
       state.currentSessionId,
       state.currentProviderId,
       state.settings.system_prompt,
       state.settings.strip_thinking
     );
-    paintUsageTag(tag, used, window, null);
+    const current =
+      lastUsage &&
+      lastUsage.sessionId === state.currentSessionId &&
+      lastUsage.window === window
+        ? lastUsage
+        : null;
+    const cached = current ? current.cached : stored ? stored[1] : null;
+    const hitBase = current ? current.used : stored ? stored[0] : 0;
+    paintUsageTag(tag, used, window, cached, hitBase);
   } catch {
     tag.textContent = "";
   }
@@ -74,17 +94,6 @@ export function buildComposer(onDone: () => void): HTMLElement {
   attach.title = "添加附件";
   bar.appendChild(attach);
 
-  const think = el("select", "composer-select");
-  Object.entries(THINK_LABEL).forEach(([key, label]) => {
-    const opt = option(label, key);
-    if (state.thinkingLevel === key) opt.selected = true;
-    think.appendChild(opt);
-  });
-  think.addEventListener("change", () => {
-    state.thinkingLevel = think.value;
-  });
-  bar.appendChild(think);
-
   const model = el("select", "composer-select");
   if (state.providers.length === 0) {
     model.appendChild(option("未配置模型", ""));
@@ -99,8 +108,21 @@ export function buildComposer(onDone: () => void): HTMLElement {
   }
   model.addEventListener("change", () => {
     state.currentProviderId = model.value;
+    rememberComposer();
   });
   bar.appendChild(model);
+
+  const think = el("select", "composer-select");
+  Object.entries(THINK_LABEL).forEach(([key, label]) => {
+    const opt = option(label, key);
+    if (state.thinkingLevel === key) opt.selected = true;
+    think.appendChild(opt);
+  });
+  think.addEventListener("change", () => {
+    state.thinkingLevel = think.value;
+    rememberComposer();
+  });
+  bar.appendChild(think);
 
   bar.appendChild(el("div", "composer-spacer"));
 
@@ -108,11 +130,38 @@ export function buildComposer(onDone: () => void): HTMLElement {
   bar.appendChild(usageTag);
   usageTagEl = usageTag;
 
-  const send = el("button", "composer-send", "发送");
+  const send = el("button", "composer-send");
   bar.appendChild(send);
 
-  const paint = (used: number, window: number, cached: number | null): void => {
-    paintUsageTag(usageTag, used, window, cached);
+  const SEND_ICON =
+    '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><path d="M7 11.5V2.5M3.2 6.3 7 2.5l3.8 3.8" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  const STOP_ICON =
+    '<svg width="11" height="11" viewBox="0 0 11 11"><rect x="1.5" y="1.5" width="8" height="8" fill="currentColor"/></svg>';
+
+  const setSendIdle = (): void => {
+    send.innerHTML = SEND_ICON;
+    send.disabled = input.value.trim().length === 0;
+    send.title = "发送";
+  };
+
+  const setSendBusy = (): void => {
+    send.innerHTML = STOP_ICON;
+    send.disabled = false;
+    send.title = "停止";
+  };
+
+  setSendIdle();
+
+  const paint = (
+    sessionId: string,
+    used: number,
+    window: number,
+    cached: number | null
+  ): void => {
+    if (cached !== null && used > 0) {
+      lastUsage = { sessionId, used, window, cached };
+    }
+    paintUsageTag(usageTag, used, window, cached, used);
   };
 
   const refresh = async (): Promise<void> => {
@@ -132,8 +181,7 @@ export function buildComposer(onDone: () => void): HTMLElement {
 
     input.value = "";
     state.streaming = true;
-    send.setAttribute("disabled", "true");
-    send.textContent = "发送中";
+    setSendBusy();
 
     state.messages = await api.getMessages(sessionId);
     state.messages.push({
@@ -204,6 +252,7 @@ export function buildComposer(onDone: () => void): HTMLElement {
           schedule(parts.length - 1);
         } else if (event.type === "usage") {
           paint(
+            sessionId,
             event.prompt_tokens,
             event.context_window,
             event.cached_tokens
@@ -222,14 +271,24 @@ export function buildComposer(onDone: () => void): HTMLElement {
       schedule(parts.length - 1);
     } finally {
       state.streaming = false;
-      send.removeAttribute("disabled");
-      send.textContent = "发送";
+      setSendIdle();
       onDone();
       void refresh();
     }
   };
 
-  send.addEventListener("click", () => void doSend());
+  send.addEventListener("click", () => {
+    if (state.streaming) {
+      void api.cancelMessage();
+      return;
+    }
+    void doSend();
+  });
+  input.addEventListener("input", () => {
+    if (!state.streaming) {
+      send.disabled = input.value.trim().length === 0;
+    }
+  });
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && e.ctrlKey) {
       e.preventDefault();

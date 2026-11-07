@@ -87,6 +87,10 @@ pub struct Session {
     pub title: String,
     #[serde(default)]
     pub created_at: i64,
+    #[serde(default)]
+    pub last_prompt_tokens: u64,
+    #[serde(default)]
+    pub last_cached_tokens: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

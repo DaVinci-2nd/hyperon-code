@@ -8,6 +8,7 @@ use approval::Pending;
 use chat::ChatMessage;
 use presets::Preset;
 use serde::Serialize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use store::{Message, Project, Provider, Session, Settings, BUILTIN_PROJECT_ID};
 use tauri::ipc::Channel;
@@ -15,12 +16,14 @@ use tauri::{AppHandle, State};
 
 pub struct AppState {
     pending: Arc<Pending>,
+    cancel: Arc<AtomicBool>,
 }
 
 impl AppState {
     fn new() -> Self {
         Self {
             pending: Arc::new(Pending::new()),
+            cancel: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -28,6 +31,11 @@ impl AppState {
 #[tauri::command]
 fn approve(state: State<'_, AppState>, id: String, allowed: bool) -> bool {
     state.pending.resolve(&id, allowed)
+}
+
+#[tauri::command]
+fn cancel_message(state: State<'_, AppState>) {
+    state.cancel.store(true, Ordering::Relaxed);
 }
 
 #[derive(Serialize)]
@@ -190,6 +198,8 @@ fn create_session(app: AppHandle, project_id: String) -> Result<Session, String>
         project_id,
         title: format!("新会话 {}", count + 1),
         created_at: store::now_ms(),
+        last_prompt_tokens: 0,
+        last_cached_tokens: 0,
     };
     db.sessions.push(session.clone());
     store::save(&app, &db);
@@ -229,19 +239,19 @@ fn get_messages_sync(app: AppHandle, session_id: String) -> Result<Vec<Message>,
 }
 
 fn estimate_tokens(text: &str) -> u64 {
-    let mut cjk: u64 = 0;
-    let mut other: u64 = 0;
+    let mut cjk: f64 = 0.0;
+    let mut other: f64 = 0.0;
     for ch in text.chars() {
         if ('\u{4e00}'..='\u{9fff}').contains(&ch)
             || ('\u{3040}'..='\u{30ff}').contains(&ch)
             || ('\u{ac00}'..='\u{d7af}').contains(&ch)
         {
-            cjk += 1;
+            cjk += 1.0;
         } else {
-            other += 1;
+            other += 1.0;
         }
     }
-    cjk + (other + 3) / 4
+    (cjk * 0.6 + other * 0.3).round() as u64
 }
 
 #[tauri::command]
@@ -251,13 +261,45 @@ fn estimate_context(
     app: AppHandle,
     system_prompt: String,
     strip_thinking: bool,
-) -> Result<(u64, u64), String> {
+) -> Result<(u64, u64, Option<(u64, u64)>), String> {
     let db = store::load(&app);
     let mut total = estimate_tokens(&system_prompt);
+
+    let protocol = db
+        .providers
+        .iter()
+        .find(|p| p.id == provider_id)
+        .or_else(|| db.providers.first())
+        .map(|p| p.protocol.clone())
+        .unwrap_or_else(|| "openai".to_string());
+    let tools_json = match protocol.as_str() {
+        "anthropic" => tools::anthropic_tools(),
+        "gemini" => tools::gemini_tools(),
+        _ => tools::openai_tools(),
+    };
+    total += estimate_tokens(&tools_json.to_string());
+
     for m in db.messages.iter().filter(|m| m.session_id == session_id) {
-        total += estimate_tokens(&m.content);
-        if m.role == "assistant" && !strip_thinking {
-            total += estimate_tokens(&m.reasoning);
+        if m.parts.is_empty() {
+            total += estimate_tokens(&m.content);
+            if m.role == "assistant" && !strip_thinking {
+                total += estimate_tokens(&m.reasoning);
+            }
+        } else {
+            for p in &m.parts {
+                match p.kind.as_str() {
+                    "think" => {
+                        if !strip_thinking {
+                            total += estimate_tokens(&p.text);
+                        }
+                    }
+                    "tool" => {
+                        total += estimate_tokens(&p.summary);
+                        total += estimate_tokens(&p.detail);
+                    }
+                    _ => total += estimate_tokens(&p.text),
+                }
+            }
         }
         total += 4;
     }
@@ -268,7 +310,20 @@ fn estimate_context(
         .or_else(|| db.providers.first())
         .map(|p| presets::context_window(&p.model))
         .unwrap_or(200_000);
-    Ok((total, window))
+
+    let last_usage = db
+        .sessions
+        .iter()
+        .find(|s| s.id == session_id)
+        .and_then(|s| {
+            if s.last_prompt_tokens > 0 {
+                Some((s.last_prompt_tokens, s.last_cached_tokens))
+            } else {
+                None
+            }
+        });
+
+    Ok((total, window, last_usage))
 }
 
 #[tauri::command]
@@ -280,6 +335,7 @@ async fn send_message(
     content: String,
     channel: Channel<chat::StreamEvent>,
 ) -> Result<String, String> {
+    state.cancel.store(false, Ordering::Relaxed);
     {
         let mut db = store::load(&app);
         if !db.sessions.iter().any(|s| s.id == session_id) {
@@ -351,13 +407,38 @@ async fn send_message(
         store::save(&app, &db2);
     }
 
+    let usage_slot: Arc<std::sync::Mutex<Option<(u64, u64)>>> =
+        Arc::new(std::sync::Mutex::new(None));
+    let usage_tap = usage_slot.clone();
+    let usage_app = app.clone();
+    let usage_session = session_id.clone();
+
     let sink = Arc::new(move |event: chat::StreamEvent| {
+        if let chat::StreamEvent::Usage {
+            prompt_tokens,
+            cached_tokens,
+            ..
+        } = &event
+        {
+            if let Ok(mut slot) = usage_tap.lock() {
+                *slot = Some((*prompt_tokens, *cached_tokens));
+            }
+            let mut db = store::load(&usage_app);
+            if let Some(s) = db.sessions.iter_mut().find(|s| s.id == usage_session) {
+                if s.last_prompt_tokens != *prompt_tokens || s.last_cached_tokens != *cached_tokens {
+                    s.last_prompt_tokens = *prompt_tokens;
+                    s.last_cached_tokens = *cached_tokens;
+                    store::save(&usage_app, &db);
+                }
+            }
+        }
         let _ = channel.send(event);
     });
 
     let ctx = chat::Ctx {
         root,
         pending: state.pending.clone(),
+        cancel: state.cancel.clone(),
     };
 
     let result = chat::stream(
@@ -376,6 +457,14 @@ async fn send_message(
                 m.content = acc.content.clone();
                 m.reasoning = acc.reasoning.clone();
                 m.parts = acc.parts.clone();
+            }
+            if let Ok(slot) = usage_slot.lock() {
+                if let Some((prompt, cached)) = *slot {
+                    if let Some(s) = db3.sessions.iter_mut().find(|s| s.id == session_id) {
+                        s.last_prompt_tokens = prompt;
+                        s.last_cached_tokens = cached;
+                    }
+                }
             }
             store::save(&app, &db3);
             Ok(assistant_id)
@@ -413,6 +502,7 @@ pub fn run() {
             get_messages_sync,
             estimate_context,
             approve,
+            cancel_message,
             send_message
         ])
         .run(tauri::generate_context!())

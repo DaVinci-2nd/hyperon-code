@@ -66,8 +66,8 @@ export function estimateContext(
   providerId: string,
   systemPrompt: string,
   stripThinking: boolean
-): Promise<[number, number]> {
-  return invoke<[number, number]>("estimate_context", {
+): Promise<[number, number, [number, number] | null]> {
+  return invoke<[number, number, [number, number] | null]>("estimate_context", {
     sessionId,
     providerId,
     systemPrompt,
@@ -89,4 +89,8 @@ export function sendMessage(
     content,
     channel,
   });
+}
+
+export function cancelMessage(): Promise<void> {
+  return invoke<void>("cancel_message");
 }

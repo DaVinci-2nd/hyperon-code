@@ -5,6 +5,7 @@ use crate::tools;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 #[derive(Clone, Serialize)]
@@ -118,6 +119,7 @@ pub struct ToolCall {
 pub struct Ctx {
     pub root: Option<String>,
     pub pending: Arc<Pending>,
+    pub cancel: Arc<AtomicBool>,
 }
 
 pub async fn stream(
@@ -130,8 +132,13 @@ pub async fn stream(
     let mut total = Acc::new();
 
     loop {
+        if ctx.cancel.load(Ordering::Relaxed) {
+            sink(StreamEvent::Done);
+            return Ok(total);
+        }
+
         let mut round = Acc::new();
-        let outcome = run_round(provider, messages, system_prompt, &sink, &mut round).await;
+        let outcome = run_round(provider, messages, system_prompt, &sink, &mut round, ctx).await;
 
         round.close_reasoning(&sink);
         total.content.push_str(&round.content);
@@ -157,6 +164,11 @@ pub async fn stream(
         messages.push(build_assistant_call(&round.content, &calls));
 
         for call in &calls {
+            if ctx.cancel.load(Ordering::Relaxed) {
+                sink(StreamEvent::Done);
+                return Ok(total);
+            }
+
             total.tool_calls.push(call.clone());
 
             let preview = tools::preview(&call.name, &call.args, ctx.root.as_deref());
@@ -208,11 +220,16 @@ async fn run_round(
     system_prompt: &str,
     sink: &EventSink,
     acc: &mut Acc,
+    ctx: &Ctx,
 ) -> Result<Vec<ToolCall>, String> {
     match provider.protocol.as_str() {
-        "anthropic" => stream_anthropic(provider, messages, system_prompt, sink, acc).await,
-        "gemini" => stream_gemini(provider, messages, system_prompt, sink, acc).await,
-        _ => stream_openai(provider, messages, system_prompt, sink, acc).await,
+        "anthropic" => {
+            stream_anthropic(provider, messages, system_prompt, sink, acc, &ctx.cancel).await
+        }
+        "gemini" => {
+            stream_gemini(provider, messages, system_prompt, sink, acc, &ctx.cancel).await
+        }
+        _ => stream_openai(provider, messages, system_prompt, sink, acc, &ctx.cancel).await,
     }
 }
 
@@ -387,6 +404,7 @@ async fn stream_openai(
     system_prompt: &str,
     sink: &EventSink,
     acc: &mut Acc,
+    cancel: &Arc<AtomicBool>,
 ) -> Result<Vec<ToolCall>, String> {
     let body = build_openai_body(provider, messages, system_prompt);
     let url = format!("{}/chat/completions", provider.base_url.trim_end_matches('/'));
@@ -410,6 +428,9 @@ async fn stream_openai(
     let mut collected: Vec<(String, String, String)> = Vec::new();
 
     while let Some(chunk) = stream.next().await {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
         let bytes = chunk.map_err(|e| format!("读取失败: {e}"))?;
         buf.push_str(&String::from_utf8_lossy(&bytes));
 
@@ -498,7 +519,21 @@ fn build_anthropic_body(
     messages: &[ChatMessage],
     system_prompt: &str,
 ) -> Value {
-    let list: Vec<Value> = messages.iter().map(anthropic_message).collect();
+    let mut list: Vec<Value> = messages.iter().map(anthropic_message).collect();
+
+    if list.len() >= 2 {
+        let idx = list.len() - 2;
+        let is_user = list[idx]["role"].as_str() == Some("user");
+        if is_user {
+            if let Some(text) = list[idx]["content"].as_str() {
+                list[idx]["content"] = json!([{
+                    "type": "text",
+                    "text": text,
+                    "cache_control": { "type": "ephemeral" }
+                }]);
+            }
+        }
+    }
 
     let mut budget: u32 = 0;
     let mut body = json!({
@@ -506,11 +541,22 @@ fn build_anthropic_body(
         "max_tokens": 8192,
         "messages": list,
         "stream": true,
-        "tools": tools::anthropic_tools(),
     });
 
+    let mut tool_list = tools::anthropic_tools();
+    if let Some(arr) = tool_list.as_array_mut() {
+        if let Some(last) = arr.last_mut() {
+            last["cache_control"] = json!({ "type": "ephemeral" });
+        }
+    }
+    body["tools"] = tool_list;
+
     if !system_prompt.is_empty() {
-        body["system"] = json!(system_prompt);
+        body["system"] = json!([{
+            "type": "text",
+            "text": system_prompt,
+            "cache_control": { "type": "ephemeral" }
+        }]);
     }
 
     if let Some(b) = presets::thinking_budget(&provider.thinking) {
@@ -586,6 +632,7 @@ async fn stream_anthropic(
     system_prompt: &str,
     sink: &EventSink,
     acc: &mut Acc,
+    cancel: &Arc<AtomicBool>,
 ) -> Result<Vec<ToolCall>, String> {
     let body = build_anthropic_body(provider, messages, system_prompt);
     let url = format!("{}/messages", provider.base_url.trim_end_matches('/'));
@@ -611,6 +658,9 @@ async fn stream_anthropic(
     let mut current: Option<(String, String, String)> = None;
 
     while let Some(chunk) = stream.next().await {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
         let bytes = chunk.map_err(|e| format!("读取失败: {e}"))?;
         buf.push_str(&String::from_utf8_lossy(&bytes));
 
@@ -777,6 +827,7 @@ async fn stream_gemini(
     system_prompt: &str,
     sink: &EventSink,
     acc: &mut Acc,
+    cancel: &Arc<AtomicBool>,
 ) -> Result<Vec<ToolCall>, String> {
     let body = build_gemini_body(messages, system_prompt, provider);
     let url = format!(
@@ -805,6 +856,9 @@ async fn stream_gemini(
     let mut calls: Vec<ToolCall> = Vec::new();
 
     while let Some(chunk) = stream.next().await {
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
         let bytes = chunk.map_err(|e| format!("读取失败: {e}"))?;
         buf.push_str(&String::from_utf8_lossy(&bytes));
 

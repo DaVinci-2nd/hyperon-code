@@ -1,6 +1,6 @@
 import "./styles.css";
 import * as api from "./api";
-import { state, recallSelection, rememberSelection } from "./state";
+import { state, recallSelection, rememberSelection, recallComposer } from "./state";
 import { bindFollow, buildMessages, mountJumpButton, resetFollow } from "./ui/chat";
 import { buildComposer, refreshUsageDisplay } from "./ui/composer";
 import { el } from "./ui/dom";
@@ -96,14 +96,18 @@ function renderMessages(): void {
   }
   const switched = lastRenderedSession !== state.currentSessionId;
   const atBottom = old.scrollHeight - old.scrollTop - old.clientHeight < 80;
+  const prevScroll = old.scrollTop;
+  const wasStreaming = state.streaming;
   lastRenderedSession = state.currentSessionId;
 
   const next = buildMessages();
   old.replaceWith(next);
 
-  if (switched || atBottom) {
+  if (switched || atBottom || wasStreaming) {
     resetFollow();
     settleScrollToBottom();
+  } else if (prevScroll > 0) {
+    next.scrollTop = prevScroll;
   }
   if (switched) refreshUsageDisplay();
   requestAnimationFrame(bindFollow);
@@ -185,9 +189,18 @@ async function boot(): Promise<void> {
     ? await api.getMessages(state.currentSessionId)
     : [];
 
-  if (state.providers.length > 0) {
-    state.currentProviderId = state.providers[0].id;
-  }
+  const savedComposer = recallComposer();
+  const savedModel =
+    savedComposer.model && state.providers.some((p) => p.id === savedComposer.model)
+      ? savedComposer.model
+      : null;
+  state.currentProviderId = savedModel ?? state.providers[0]?.id ?? "";
+
+  const levels = ["off", "low", "medium", "high", "max"];
+  state.thinkingLevel =
+    savedComposer.thinking && levels.includes(savedComposer.thinking)
+      ? savedComposer.thinking
+      : "medium";
 
   rememberSelection();
   render();

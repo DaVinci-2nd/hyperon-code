@@ -29,15 +29,69 @@ function thinkPart(text: string): HTMLElement {
   return foldBlock("思考过程", body, "think-block");
 }
 
+function buildDiffElement(diffText: string): HTMLElement {
+  const diff = el("div", "diff");
+  let firstChange: HTMLElement | null = null;
+  diffText.split("\n").forEach((line) => {
+    const row = el("div", "diff-line");
+    if (line.startsWith("+")) {
+      row.classList.add("is-add");
+      if (!firstChange) firstChange = row;
+    } else if (line.startsWith("-")) {
+      row.classList.add("is-del");
+      if (!firstChange) firstChange = row;
+    } else {
+      row.classList.add("is-meta");
+    }
+    row.textContent = line.length > 0 ? line : " ";
+    diff.appendChild(row);
+  });
+  if (firstChange) {
+    requestAnimationFrame(() => {
+      const target = firstChange as HTMLElement;
+      diff.scrollTop = Math.max(0, target.offsetTop - diff.clientHeight / 3);
+    });
+  }
+  return diff;
+}
+
 function toolPart(part: Part): HTMLElement {
   const body = el("div", "tool-body");
-  if (part.detail) {
-    const pre = el("pre", "tool-output");
-    pre.textContent = part.detail;
-    body.appendChild(pre);
+  const MARKER = "---diff---";
+
+  if (part.detail.includes(MARKER)) {
+    const at = part.detail.indexOf(MARKER);
+    const head = part.detail.slice(0, at).replace(/\n$/, "");
+    const diffText = part.detail.slice(at + MARKER.length).replace(/^\n/, "");
+    if (head) {
+      const pre = el("pre", "tool-output");
+      pre.textContent = head;
+      body.appendChild(pre);
+    }
+    body.appendChild(buildDiffElement(diffText));
+  } else if (part.detail) {
+    const lines = part.detail.split("\n");
+    const isEdit = part.summary.startsWith("编辑 ") || part.summary.startsWith("写入 ");
+    const rest = lines.slice(1);
+    const looksLikeDiff =
+      isEdit &&
+      rest.length > 0 &&
+      rest.every((l) => l.startsWith(" ") || l.startsWith("-") || l.startsWith("+"));
+    if (looksLikeDiff) {
+      const head = lines[0].replace(/^ok /, "");
+      const pre = el("pre", "tool-output");
+      pre.textContent = head;
+      body.appendChild(pre);
+      body.appendChild(buildDiffElement(rest.join("\n")));
+    } else {
+      const pre = el("pre", "tool-output");
+      pre.textContent = part.detail;
+      body.appendChild(pre);
+    }
   } else {
     body.appendChild(el("div", "empty-hint", "无输出"));
   }
+
   const mark = part.ok ? "✓" : "✕";
   return foldBlock(`${mark} ${part.summary}`, body, "tool-block");
 }
@@ -233,12 +287,9 @@ export function patchStreamingRow(row: HTMLElement, patch: StreamPatch): void {
       body.scrollTop = body.scrollHeight;
     }
   } else if (patch.part.kind === "tool") {
-    const head = node.querySelector(".fold-head");
-    if (head) {
-      head.textContent = `${patch.part.ok ? "✓" : "✕"} ${patch.part.summary}`;
-    }
-    const out = node.querySelector(".tool-output");
-    if (out) out.textContent = patch.part.detail;
+    const fresh = partNode(patch.part);
+    fresh.dataset.part = String(patch.index);
+    node.replaceWith(fresh);
   } else {
     node.innerHTML = renderMarkdownTail(patch.part.text || "…");
   }

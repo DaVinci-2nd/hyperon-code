@@ -5,38 +5,80 @@
   --sidebar-w: 240px;
   --right-w: 280px;
   --radius: 6px;
+  --hue: 100;
+  --sat: 0.1;
+  --bg: #040504;
+  --code-fg: #ffffff;
+  --bubble-code-fg: #000000;
+  color-scheme: dark;
 }
 
 :root[data-theme="dark"] {
-  --bg: #0e0e10;
-  --panel: #141417;
-  --panel-2: #191a1d;
-  --border: #26262b;
-  --text: #e6e6e6;
-  --muted: #8a8a93;
-  --hover: #1f2024;
-  --active: #26272c;
-  --accent: #5b8cff;
-  --bubble-bg: #ffffff;
-  --bubble-fg: #101014;
-  --code-bg: #101013;
-  --code-head: #17181c;
+  color-scheme: dark;
+  --v-bg: 2%;
+  --v-panel: 6%;
+  --v-panel-2: 8%;
+  --v-border: 12%;
+  --v-text: 100%;
+  --v-muted: 60%;
+  --v-hover: 4%;
+  --v-active: 10%;
+  --v-accent: 55%;
+  --v-bubble-bg: 92%;
+  --v-bubble-fg: 2%;
+  --v-code-bg: 4%;
+  --v-code-head: 7%;
+  --v-inline-code-bg: 14%;
+  --code-fg: #ffffff;
+  --bubble-code-fg: #000000;
+  --bg: hwb(var(--hue) calc((1 - var(--sat)) * var(--v-bg)) calc(100% - var(--v-bg)));
+  --panel: hwb(var(--hue) calc((1 - var(--sat)) * var(--v-panel)) calc(100% - var(--v-panel)));
+  --panel-2: hwb(var(--hue) calc((1 - var(--sat)) * var(--v-panel-2)) calc(100% - var(--v-panel-2)));
+  --border: hwb(var(--hue) calc((1 - var(--sat)) * var(--v-border)) calc(100% - var(--v-border)));
+  --text: hwb(var(--hue) calc((1 - var(--sat)) * var(--v-text)) calc(100% - var(--v-text)));
+  --muted: hwb(var(--hue) calc((1 - var(--sat)) * var(--v-muted)) calc(100% - var(--v-muted)));
+  --hover: hwb(var(--hue) calc((1 - var(--sat)) * var(--v-hover)) calc(100% - var(--v-hover)));
+  --active: hwb(var(--hue) calc((1 - var(--sat)) * var(--v-active)) calc(100% - var(--v-active)));
+  --accent: hwb(var(--hue) calc((1 - var(--sat)) * var(--v-accent)) calc(100% - var(--v-accent)));
+  --bubble-bg: hwb(var(--hue) calc((1 - var(--sat)) * var(--v-bubble-bg)) calc(100% - var(--v-bubble-bg)));
+  --bubble-fg: hwb(var(--hue) calc((1 - var(--sat)) * var(--v-bubble-fg)) calc(100% - var(--v-bubble-fg)));
+  --code-bg: hwb(var(--hue) calc((1 - var(--sat)) * var(--v-code-bg)) calc(100% - var(--v-code-bg)));
+  --inline-code-bg: hwb(var(--hue) calc((1 - var(--sat)) * var(--v-inline-code-bg)) calc(100% - var(--v-inline-code-bg)));
+  --code-head: hwb(var(--hue) calc((1 - var(--sat)) * var(--v-code-head)) calc(100% - var(--v-code-head)));
 }
 
 :root[data-theme="light"] {
-  --bg: #ffffff;
-  --panel: #f6f6f7;
-  --panel-2: #efeff1;
-  --border: #e2e2e6;
-  --text: #1a1a1c;
-  --muted: #6b6b73;
-  --hover: #eaeaee;
-  --active: #dedee3;
-  --accent: #2f6bff;
-  --bubble-bg: #101014;
-  --bubble-fg: #ffffff;
-  --code-bg: #f3f3f5;
-  --code-head: #e8e8ec;
+  color-scheme: light;
+  --v-bg: 98%;
+  --v-panel: 94%;
+  --v-panel-2: 92%;
+  --v-border: 88%;
+  --v-text: 0%;
+  --v-muted: 40%;
+  --v-hover: 96%;
+  --v-active: 90%;
+  --v-accent: 45%;
+  --v-bubble-bg: 8%;
+  --v-bubble-fg: 98%;
+  --v-code-bg: 96%;
+  --v-code-head: 93%;
+  --v-inline-code-bg: 86%;
+  --code-fg: #000000;
+  --bubble-code-fg: #ffffff;
+  --bg: hwb(var(--hue) calc((1 - var(--sat)) * var(--v-bg)) calc(100% - var(--v-bg)));
+  --panel: hwb(var(--hue) calc((1 - var(--sat)) * var(--v-panel)) calc(100% - var(--v-panel)));
+  --panel-2: hwb(var(--hue) calc((1 - var(--sat)) * var(--v-panel-2)) calc(100% - var(--v-panel-2)));
+  --border: hwb(var(--hue) calc((1 - var(--sat)) * var(--v-border)) calc(100% - var(--v-border)));
+  --text: hwb(var(--hue) calc((1 - var(--sat)) * var(--v-text)) calc(100% - var(--v-text)));
+  --muted: hwb(var(--hue) calc((1 - var(--sat)) * var(--v-muted)) calc(100% - var(--v-muted)));
+  --hover: hwb(var(--hue) calc((1 - var(--sat)) * var(--v-hover)) calc(100% - var(--v-hover)));
+  --active: hwb(var(--hue) calc((1 - var(--sat)) * var(--v-active)) calc(100% - var(--v-active)));
+  --accent: hwb(var(--hue) calc((1 - var(--sat)) * var(--v-accent)) calc(100% - var(--v-accent)));
+  --bubble-bg: hwb(var(--hue) calc((1 - var(--sat)) * var(--v-bubble-bg)) calc(100% - var(--v-bubble-bg)));
+  --bubble-fg: hwb(var(--hue) calc((1 - var(--sat)) * var(--v-bubble-fg)) calc(100% - var(--v-bubble-fg)));
+  --code-bg: hwb(var(--hue) calc((1 - var(--sat)) * var(--v-code-bg)) calc(100% - var(--v-code-bg)));
+  --inline-code-bg: hwb(var(--hue) calc((1 - var(--sat)) * var(--v-inline-code-bg)) calc(100% - var(--v-inline-code-bg)));
+  --code-head: hwb(var(--hue) calc((1 - var(--sat)) * var(--v-code-head)) calc(100% - var(--v-code-head)));
 }
 
 * {
@@ -53,6 +95,7 @@ body {
   color: var(--text);
   font-family: var(--font-ui);
   font-size: 13px;
+  scrollbar-color: var(--border) var(--bg);
 }
 
 #app {
@@ -265,6 +308,48 @@ select {
   overflow-wrap: anywhere;
 }
 
+.msg-bubble .msg-body code {
+  background: rgba(127, 127, 127, 0.22);
+  color: var(--bubble-code-fg);
+}
+
+.msg-bubble .msg-body a {
+  color: inherit;
+  text-decoration: underline;
+}
+
+.msg-bubble .code-block {
+  background: rgba(127, 127, 127, 0.14);
+  border-color: rgba(127, 127, 127, 0.3);
+}
+
+.msg-bubble .code-lang {
+  background: rgba(127, 127, 127, 0.2);
+  border-bottom-color: rgba(127, 127, 127, 0.3);
+  color: inherit;
+  opacity: 0.7;
+}
+
+.msg-bubble .code-pre code {
+  background: none;
+  color: var(--bubble-code-fg);
+}
+
+.msg-bubble .msg-body blockquote {
+  border-left-color: rgba(127, 127, 127, 0.4);
+  color: inherit;
+  opacity: 0.75;
+}
+
+.msg-bubble .msg-body th,
+.msg-bubble .msg-body td {
+  border-color: rgba(127, 127, 127, 0.35);
+}
+
+.msg-bubble .msg-body hr {
+  border-top-color: rgba(127, 127, 127, 0.3);
+}
+
 .msg-assistant {
   justify-content: flex-start;
 }
@@ -329,7 +414,8 @@ select {
   font-size: 12px;
   padding: 1px 5px;
   border-radius: 4px;
-  background: var(--code-bg);
+  background: var(--inline-code-bg);
+  color: var(--code-fg);
 }
 
 .msg-bubble .msg-body code {
@@ -367,6 +453,7 @@ select {
   border-radius: var(--radius);
   overflow: hidden;
   background: var(--code-bg);
+  color: var(--code-fg);
 }
 
 .code-lang {
@@ -387,6 +474,7 @@ select {
 .code-pre code {
   padding: 0;
   background: none;
+  color: var(--code-fg);
   font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.55;
@@ -544,12 +632,25 @@ select {
 }
 
 .composer-send {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
   height: 26px;
-  padding: 0 14px;
+  padding: 0;
   border-radius: var(--radius);
   background: var(--bubble-bg);
   color: var(--bubble-fg);
-  font-weight: 500;
+}
+
+.composer-send:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.composer-send:not(:disabled):hover {
+  filter: brightness(1.08);
 }
 
 .usage-tag {
@@ -557,6 +658,10 @@ select {
   font-size: 11px;
   color: var(--muted);
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: 0 1 auto;
   font-variant-numeric: tabular-nums;
 }
 
@@ -1068,12 +1173,29 @@ select {
   font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.5;
+  position: relative;
+}
+
+.tool-body .diff {
+  max-height: none;
+  overflow: visible;
+  border: none;
+  border-radius: 0;
+  background: none;
+}
+
+.tool-output + .diff {
+  margin-top: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 6px;
 }
 
 .diff-line {
   padding: 1px 10px;
-  white-space: pre-wrap;
-  word-break: break-all;
+  white-space: pre;
+  word-break: normal;
+  overflow-x: visible;
+  min-height: 18px;
 }
 
 .diff-line.is-add {
@@ -1087,7 +1209,7 @@ select {
 }
 
 .diff-line.is-meta {
-  color: var(--muted);
+  color: var(--code-fg);
 }
 
 .diff-empty {
@@ -1099,7 +1221,7 @@ select {
   margin: 0 0 8px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  background: var(--panel-2);
+  background: var(--code-bg);
   overflow: hidden;
 }
 
@@ -1138,7 +1260,7 @@ select {
   padding: 2px 10px 10px;
   border-top: 1px solid var(--border);
   max-height: 360px;
-  overflow-y: auto;
+  overflow: auto;
 }
 
 .fold-body > :first-child {
@@ -1147,6 +1269,7 @@ select {
 
 .tool-body {
   font-family: var(--font-mono);
+  min-width: 0;
 }
 
 .tool-output {
@@ -1154,9 +1277,10 @@ select {
   padding: 0;
   font-size: 12px;
   line-height: 1.5;
-  white-space: pre-wrap;
-  word-break: break-all;
-  color: var(--muted);
+  white-space: pre;
+  word-break: normal;
+  overflow-x: auto;
+  color: var(--code-fg);
 }
 
 .settings-pane-host {

@@ -147,13 +147,13 @@ pub fn preview(name: &str, args: &Value, root: Option<&str>) -> ApprovalPreview 
         "bash" => {
             let cmd = args["command"].as_str().unwrap_or("");
             let cwd = args["cwd"].as_str().unwrap_or(root.unwrap_or(""));
+            let mut detail = cmd.to_string();
+            if !cwd.is_empty() {
+                detail.push_str(&format!("\ncwd: {cwd}"));
+            }
             ApprovalPreview {
-                summary: format!("执行 {cmd}"),
-                detail: if cwd.is_empty() {
-                    String::new()
-                } else {
-                    format!("cwd: {cwd}")
-                },
+                summary: "执行命令".to_string(),
+                detail,
                 kind: "bash".to_string(),
             }
         }
@@ -171,27 +171,59 @@ pub fn preview(name: &str, args: &Value, root: Option<&str>) -> ApprovalPreview 
 }
 
 fn diff_text(old: &str, new: &str) -> String {
-    let old_lines: Vec<&str> = old.lines().collect();
-    let new_lines: Vec<&str> = new.lines().collect();
-    let mut out: Vec<String> = Vec::new();
-    let mut i = 0usize;
-    let mut j = 0usize;
+    let a: Vec<&str> = old.lines().collect();
+    let b: Vec<&str> = new.lines().collect();
+    let n = a.len();
+    let m = b.len();
 
-    while i < old_lines.len() || j < new_lines.len() {
-        if i < old_lines.len() && j < new_lines.len() && old_lines[i] == new_lines[j] {
+    let mut lcs = vec![vec![0usize; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            lcs[i][j] = if a[i] == b[j] {
+                lcs[i + 1][j + 1] + 1
+            } else {
+                lcs[i + 1][j].max(lcs[i][j + 1])
+            };
+        }
+    }
+
+    let mut ops: Vec<(char, &str)> = Vec::new();
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < n && j < m {
+        if a[i] == b[j] {
+            ops.push((' ', a[i]));
             i += 1;
             j += 1;
-            continue;
-        }
-        if i < old_lines.len() {
-            out.push(format!("- {}", old_lines[i]));
+        } else if lcs[i + 1][j] >= lcs[i][j + 1] {
+            ops.push(('-', a[i]));
             i += 1;
-            continue;
+        } else {
+            ops.push(('+', b[j]));
+            j += 1;
         }
-        out.push(format!("+ {}", new_lines[j]));
+    }
+    while i < n {
+        ops.push(('-', a[i]));
+        i += 1;
+    }
+    while j < m {
+        ops.push(('+', b[j]));
         j += 1;
     }
+
+    let mut out: Vec<String> = Vec::new();
+    for (mark, line) in ops {
+        out.push(format!("{mark}{line}"));
+    }
     out.join("\n")
+}
+
+fn change_detail(old: &str, new: &str) -> String {
+    let raw = diff_text(old, new);
+    if raw.is_empty() {
+        return String::new();
+    }
+    raw
 }
 
 pub fn execute(name: &str, args: &Value, root: Option<&str>) -> String {
@@ -225,11 +257,17 @@ fn run(name: &str, args: &Value, root: Option<&str>) -> Result<String, String> {
             let path = args["path"].as_str().ok_or("缺 path")?;
             let content = args["content"].as_str().unwrap_or("");
             let abs = resolve(root, path);
+            let before = fs::read_to_string(&abs).unwrap_or_default();
             if let Some(parent) = abs.parent() {
                 let _ = fs::create_dir_all(parent);
             }
             fs::write(&abs, content).map_err(|e| e.to_string())?;
-            Ok(format!("ok {}", abs.display()))
+            let diff = change_detail(&before, content);
+            if diff.is_empty() {
+                Ok(format!("ok {}", abs.display()))
+            } else {
+                Ok(format!("ok {}\n---diff---\n{}", abs.display(), diff))
+            }
         }
         "edit" => {
             let path = args["path"].as_str().ok_or("缺 path")?;
@@ -240,8 +278,14 @@ fn run(name: &str, args: &Value, root: Option<&str>) -> Result<String, String> {
             if !text.contains(old) {
                 return Err("未找到待替换文本".to_string());
             }
-            fs::write(&abs, text.replacen(old, new, 1)).map_err(|e| e.to_string())?;
-            Ok(format!("ok {}", abs.display()))
+            let updated = text.replacen(old, new, 1);
+            fs::write(&abs, &updated).map_err(|e| e.to_string())?;
+            let diff = change_detail(&text, &updated);
+            if diff.is_empty() {
+                Ok(format!("ok {}", abs.display()))
+            } else {
+                Ok(format!("ok {}\n---diff---\n{}", abs.display(), diff))
+            }
         }
         "list" => {
             let path = args["path"].as_str().unwrap_or(".");
@@ -280,12 +324,17 @@ fn run(name: &str, args: &Value, root: Option<&str>) -> Result<String, String> {
             let mut cmd = Command::new("powershell");
             cmd.arg("-NoProfile").arg("-Command").arg(command);
             if !cwd.is_empty() {
-                cmd.current_dir(cwd);
+                cmd.current_dir(&cwd);
             }
             let output = cmd.output().map_err(|e| e.to_string())?;
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            let mut text = stdout;
+            let mut text = format!("> {command}\n");
+            if !cwd.is_empty() {
+                text.push_str(&format!("cwd: {cwd}\n"));
+            }
+            text.push_str("---output---\n");
+            text.push_str(&stdout);
             if !stderr.is_empty() {
                 text.push_str(&stderr);
             }

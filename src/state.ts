@@ -87,3 +87,33 @@ export function recallSelection(): { project: string | null; session: string | n
     return { project: null, session: null };
   }
 }
+
+const COMPOSER_KEY = "hyperon.composer";
+
+export function rememberComposer(): void {
+  try {
+    localStorage.setItem(
+      COMPOSER_KEY,
+      JSON.stringify({
+        model: state.currentProviderId,
+        thinking: state.thinkingLevel,
+      })
+    );
+  } catch {
+    /* 忽略 */
+  }
+}
+
+export function recallComposer(): { model: string | null; thinking: string | null } {
+  try {
+    const raw = localStorage.getItem(COMPOSER_KEY);
+    if (!raw) return { model: null, thinking: null };
+    const parsed = JSON.parse(raw) as { model?: string | null; thinking?: string | null };
+    return {
+      model: parsed.model ?? null,
+      thinking: parsed.thinking ?? null,
+    };
+  } catch {
+    return { model: null, thinking: null };
+  }
+}
