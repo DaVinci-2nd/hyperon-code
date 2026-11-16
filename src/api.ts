@@ -1,5 +1,16 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
-import type { Message, Preset, Project, Provider, Session, Settings, Snapshot, StreamEvent } from "./types";
+import type {
+  Message,
+  Preset,
+  Project,
+  Provider,
+  RollbackPlan,
+  RollbackReport,
+  Session,
+  Settings,
+  Snapshot,
+  StreamEvent,
+} from "./types";
 
 export function loadAll(): Promise<Snapshot> {
   return invoke<Snapshot>("load_all");
@@ -55,6 +66,21 @@ export function deleteSession(id: string): Promise<void> {
 
 export function getMessages(sessionId: string): Promise<Message[]> {
   return invoke<Message[]>("get_messages", { sessionId });
+}
+
+export function rollbackPreview(
+  sessionId: string,
+  messageId: string
+): Promise<RollbackPlan> {
+  return invoke<RollbackPlan>("rollback_preview", { sessionId, messageId });
+}
+
+export function rollbackApply(
+  sessionId: string,
+  messageId: string,
+  force = false
+): Promise<RollbackReport> {
+  return invoke<RollbackReport>("rollback_apply", { sessionId, messageId, force });
 }
 
 export function approve(id: string, allowed: boolean): Promise<boolean> {

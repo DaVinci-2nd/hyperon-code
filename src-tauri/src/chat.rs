@@ -1,12 +1,16 @@
 use crate::approval::Pending;
 use crate::presets;
 use crate::store::{Part, Provider};
-use crate::tools;
+use crate::tools::{self, FileChangeInfo};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
+
+const TAP_INTERVAL_MS: u128 = 80;
 
 #[derive(Clone, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -15,6 +19,16 @@ pub enum StreamEvent {
     Reasoning { text: String },
     ReasoningEnd,
     TextStart,
+    ApprovalStart {
+        id: String,
+        tool: String,
+        kind: String,
+    },
+    ApprovalDelta {
+        id: String,
+        summary: String,
+        append: String,
+    },
     Approval {
         id: String,
         tool: String,
@@ -79,7 +93,9 @@ pub struct Acc {
     pub reasoning: String,
     pub parts: Vec<Part>,
     pub tool_calls: Vec<ToolCall>,
+    pub changes: Vec<FileChangeInfo>,
     pub truncated: bool,
+    announced: Vec<String>,
     reasoning_open: bool,
     text_open: bool,
 }
@@ -91,7 +107,9 @@ impl Acc {
             reasoning: String::new(),
             parts: Vec::new(),
             tool_calls: Vec::new(),
+            changes: Vec::new(),
             truncated: false,
+            announced: Vec::new(),
             reasoning_open: false,
             text_open: false,
         }
@@ -144,6 +162,7 @@ pub async fn stream(
         total.content.push_str(&round.content);
         total.reasoning.push_str(&round.reasoning);
         total.parts.extend(round.parts);
+        total.changes.extend(round.changes);
 
         let calls = match outcome {
             Ok(calls) => calls,
@@ -174,6 +193,17 @@ pub async fn stream(
             let preview = tools::preview(&call.name, &call.args, ctx.root.as_deref());
             let approved = if tools::needs_approval(&call.name) {
                 let id = call.id.clone();
+                if !round.announced.contains(&id) {
+                    sink(StreamEvent::ApprovalStart {
+                        id: id.clone(),
+                        tool: call.name.clone(),
+                        kind: tap_kind(&call.name).to_string(),
+                    });
+                }
+                let rx = ctx.pending.register(&id);
+                if ctx.cancel.load(Ordering::Relaxed) {
+                    ctx.pending.resolve(&id, false);
+                }
                 sink(StreamEvent::Approval {
                     id: id.clone(),
                     tool: call.name.clone(),
@@ -181,17 +211,23 @@ pub async fn stream(
                     detail: preview.detail.clone(),
                     kind: preview.kind.clone(),
                 });
-                let rx = ctx.pending.register(&id);
                 rx.await.unwrap_or(false)
             } else {
                 true
             };
 
+            let mut produced: Option<FileChangeInfo> = None;
             let result = if approved {
-                tools::execute(&call.name, &call.args, ctx.root.as_deref())
+                let (text, change) =
+                    tools::execute_tracked(&call.name, &call.args, ctx.root.as_deref());
+                produced = change;
+                text
             } else {
                 "user denied".to_string()
             };
+            if let Some(info) = produced {
+                total.changes.push(info);
+            }
 
             total.parts.push(Part {
                 kind: "tool".to_string(),
@@ -199,6 +235,9 @@ pub async fn stream(
                 summary: preview.summary.clone(),
                 detail: result.clone(),
                 ok: approved,
+                tool_call_id: call.id.clone(),
+                tool_name: call.name.clone(),
+                tool_args: serde_json::to_string(&call.args).unwrap_or_default(),
             });
 
             sink(StreamEvent::ToolEnd {
@@ -307,6 +346,9 @@ fn emit_delta(sink: &EventSink, acc: &mut Acc, text: &str) {
             summary: String::new(),
             detail: String::new(),
             ok: true,
+            tool_call_id: String::new(),
+            tool_name: String::new(),
+            tool_args: String::new(),
         });
     }
     acc.content.push_str(text);
@@ -333,6 +375,9 @@ fn emit_reasoning(sink: &EventSink, acc: &mut Acc, text: &str) {
             summary: String::new(),
             detail: String::new(),
             ok: true,
+            tool_call_id: String::new(),
+            tool_name: String::new(),
+            tool_args: String::new(),
         });
     }
     acc.reasoning.push_str(text);
@@ -426,6 +471,7 @@ async fn stream_openai(
     let mut stream = resp.bytes_stream();
     let mut buf = String::new();
     let mut collected: Vec<(String, String, String)> = Vec::new();
+    let mut taps: Vec<Option<TapState>> = Vec::new();
 
     while let Some(chunk) = stream.next().await {
         if cancel.load(Ordering::Relaxed) {
@@ -480,15 +526,37 @@ async fn stream_openai(
                     let idx = c["index"].as_u64().unwrap_or(0) as usize;
                     while collected.len() <= idx {
                         collected.push((String::new(), String::new(), String::new()));
+                        taps.push(None);
                     }
                     if let Some(id) = c["id"].as_str() {
-                        collected[idx].0.push_str(id);
+                        if !id.is_empty() && collected[idx].0.is_empty() {
+                            collected[idx].0 = id.to_string();
+                        }
                     }
                     if let Some(name) = c["function"]["name"].as_str() {
-                        collected[idx].1.push_str(name);
+                        if !name.is_empty() {
+                            collected[idx].1.push_str(name);
+                        }
+                    }
+                    if taps[idx].is_none() && !collected[idx].1.is_empty() {
+                        if collected[idx].0.is_empty() {
+                            collected[idx].0 = crate::store::new_id();
+                        }
+                        let id = collected[idx].0.clone();
+                        let name = collected[idx].1.clone();
+                        sink(StreamEvent::ApprovalStart {
+                            id: id.clone(),
+                            tool: name.clone(),
+                            kind: tap_kind(&name).to_string(),
+                        });
+                        acc.announced.push(id);
+                        taps[idx] = Some(TapState::new(&name));
                     }
                     if let Some(args) = c["function"]["arguments"].as_str() {
                         collected[idx].2.push_str(args);
+                        if let Some(tap) = taps[idx].as_mut() {
+                            tap_feed(tap, &collected[idx].2, &collected[idx].0, sink);
+                        }
                     }
                 }
             }
@@ -512,6 +580,209 @@ fn finish_openai_calls(collected: Vec<(String, String, String)>) -> Vec<ToolCall
             args: serde_json::from_str(&args).unwrap_or(json!({})),
         })
         .collect()
+}
+
+struct TapState {
+    tool: String,
+    kind: String,
+    summary: String,
+    body: String,
+    published: usize,
+    last: Instant,
+}
+
+impl TapState {
+    fn new(tool: &str) -> Self {
+        Self {
+            tool: tool.to_string(),
+            kind: tap_kind(tool).to_string(),
+            summary: String::new(),
+            body: String::new(),
+            published: 0,
+            last: Instant::now(),
+        }
+    }
+}
+
+fn tap_kind(tool: &str) -> &'static str {
+    match tool {
+        "write" => "write",
+        "edit" => "edit",
+        "bash" => "bash",
+        "fetch" => "fetch",
+        _ => "read",
+    }
+}
+
+fn tap_preview(state: &TapState, raw: &str) -> (String, String) {
+    let fields = partial_fields(raw);
+    let path = fields.get("path").map(String::as_str).unwrap_or("");
+    match state.kind.as_str() {
+        "write" => {
+            let body = fields.get("content").cloned().unwrap_or_default();
+            (format!("写入 {path}"), body)
+        }
+        "edit" => {
+            let body = fields.get("new").cloned().unwrap_or_default();
+            (format!("编辑 {path}"), body)
+        }
+        "bash" => {
+            let body = fields.get("command").cloned().unwrap_or_default();
+            ("执行命令".to_string(), body)
+        }
+        "fetch" => {
+            let url = fields.get("url").map(String::as_str).unwrap_or("");
+            (format!("取 {url}"), String::new())
+        }
+        _ => {
+            let hint = if !path.is_empty() {
+                path
+            } else {
+                fields.get("pattern").map(String::as_str).unwrap_or("")
+            };
+            let summary = format!("{} {}", state.tool, hint);
+            (summary.trim().to_string(), String::new())
+        }
+    }
+}
+
+fn tap_feed(state: &mut TapState, raw: &str, id: &str, sink: &EventSink) {
+    let now = Instant::now();
+    if now.duration_since(state.last).as_millis() < TAP_INTERVAL_MS {
+        return;
+    }
+    state.last = now;
+
+    let (summary, body) = tap_preview(state, raw);
+    if !body.starts_with(&state.body) {
+        state.published = 0;
+    }
+    state.body = body;
+
+    let append = if state.published <= state.body.len() {
+        state.body[state.published..].to_string()
+    } else {
+        state.body.clone()
+    };
+    state.published = state.body.len();
+
+    if append.is_empty() && summary == state.summary {
+        return;
+    }
+    state.summary = summary.clone();
+    sink(StreamEvent::ApprovalDelta {
+        id: id.to_string(),
+        summary,
+        append,
+    });
+}
+
+fn partial_fields(raw: &str) -> HashMap<String, String> {
+    let mut out: HashMap<String, String> = HashMap::new();
+    let chars: Vec<char> = raw.chars().collect();
+    let mut i = 0usize;
+    let mut depth = 0i32;
+
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '{' || c == '[' {
+            depth += 1;
+            i += 1;
+            continue;
+        }
+        if c == '}' || c == ']' {
+            depth -= 1;
+            i += 1;
+            continue;
+        }
+        if c != '"' {
+            i += 1;
+            continue;
+        }
+
+        let (key, next, closed) = read_json_string(&chars, i);
+        i = next;
+        if depth != 1 || !closed {
+            continue;
+        }
+
+        let mut j = i;
+        while j < chars.len() && chars[j].is_whitespace() {
+            j += 1;
+        }
+        if j >= chars.len() || chars[j] != ':' {
+            continue;
+        }
+        j += 1;
+        while j < chars.len() && chars[j].is_whitespace() {
+            j += 1;
+        }
+        if j >= chars.len() || chars[j] != '"' {
+            continue;
+        }
+        let (value, next, _) = read_json_string(&chars, j);
+        out.insert(key, value);
+        i = next;
+    }
+
+    out
+}
+
+fn read_json_string(chars: &[char], start: usize) -> (String, usize, bool) {
+    let mut out = String::new();
+    let mut i = start + 1;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '"' {
+            return (out, i + 1, true);
+        }
+        if c != '\\' {
+            out.push(c);
+            i += 1;
+            continue;
+        }
+        if i + 1 >= chars.len() {
+            return (out, i + 1, false);
+        }
+        match chars[i + 1] {
+            'n' => out.push('\n'),
+            't' => out.push('\t'),
+            'r' => out.push('\r'),
+            'b' => out.push('\u{0008}'),
+            'f' => out.push('\u{000c}'),
+            '"' => out.push('"'),
+            '\\' => out.push('\\'),
+            '/' => out.push('/'),
+            'u' => {
+                if i + 6 > chars.len() {
+                    return (out, chars.len(), false);
+                }
+                let hex: String = chars[i + 2..i + 6].iter().collect();
+                let mut code = u32::from_str_radix(&hex, 16).unwrap_or(0);
+                let mut next = i + 6;
+                if (0xD800..0xDC00).contains(&code)
+                    && next + 6 <= chars.len()
+                    && chars[next] == '\\'
+                    && chars[next + 1] == 'u'
+                {
+                    let hex2: String = chars[next + 2..next + 6].iter().collect();
+                    let low = u32::from_str_radix(&hex2, 16).unwrap_or(0);
+                    if (0xDC00..0xE000).contains(&low) {
+                        code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
+                        next += 6;
+                    }
+                }
+                if let Some(ch) = char::from_u32(code) {
+                    out.push(ch);
+                }
+                i = next;
+                continue;
+            }
+            other => out.push(other),
+        }
+        i += 2;
+    }
+    (out, i, false)
 }
 
 fn build_anthropic_body(
@@ -586,6 +857,9 @@ fn anthropic_message(m: &ChatMessage) -> Value {
                     }));
                 }
             }
+            if !m.content.is_empty() {
+                blocks.push(json!({ "type": "text", "text": m.content }));
+            }
             for c in list {
                 let args: Value = c["function"]["arguments"]
                     .as_str()
@@ -655,7 +929,7 @@ async fn stream_anthropic(
     let mut stream = resp.bytes_stream();
     let mut buf = String::new();
     let mut calls: Vec<ToolCall> = Vec::new();
-    let mut current: Option<(String, String, String)> = None;
+    let mut current: Option<(String, String, String, Option<TapState>)> = None;
 
     while let Some(chunk) = stream.next().await {
         if cancel.load(Ordering::Relaxed) {
@@ -705,11 +979,26 @@ async fn stream_anthropic(
                 }
                 Some("content_block_start") => {
                     if value["content_block"]["type"].as_str() == Some("tool_use") {
-                        current = Some((
-                            value["content_block"]["id"].as_str().unwrap_or("").to_string(),
-                            value["content_block"]["name"].as_str().unwrap_or("").to_string(),
-                            String::new(),
-                        ));
+                        let id = value["content_block"]["id"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_string();
+                        let name = value["content_block"]["name"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_string();
+                        let tap = if name.is_empty() {
+                            None
+                        } else {
+                            sink(StreamEvent::ApprovalStart {
+                                id: id.clone(),
+                                tool: name.clone(),
+                                kind: tap_kind(&name).to_string(),
+                            });
+                            acc.announced.push(id.clone());
+                            Some(TapState::new(&name))
+                        };
+                        current = Some((id, name, String::new(), tap));
                     }
                 }
                 Some("content_block_delta") => {
@@ -721,13 +1010,16 @@ async fn stream_anthropic(
                         emit_reasoning(sink, acc, thinking);
                     }
                     if let Some(partial) = delta["partial_json"].as_str() {
-                        if let Some((_, _, args)) = current.as_mut() {
+                        if let Some((id, _, args, tap)) = current.as_mut() {
                             args.push_str(partial);
+                            if let Some(t) = tap.as_mut() {
+                                tap_feed(t, args.as_str(), id.as_str(), sink);
+                            }
                         }
                     }
                 }
                 Some("content_block_stop") => {
-                    if let Some((id, name, args)) = current.take() {
+                    if let Some((id, name, args, _)) = current.take() {
                         if !name.is_empty() {
                             calls.push(ToolCall {
                                 id,
@@ -787,6 +1079,9 @@ fn gemini_content(m: &ChatMessage) -> Value {
                 if !reasoning.is_empty() {
                     parts.push(json!({ "text": reasoning, "thought": true }));
                 }
+            }
+            if !m.content.is_empty() {
+                parts.push(json!({ "text": m.content }));
             }
             for c in list {
                 let args: Value = c["function"]["arguments"]

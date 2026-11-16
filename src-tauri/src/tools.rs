@@ -107,6 +107,33 @@ pub struct ApprovalPreview {
     pub kind: String,
 }
 
+pub struct FileChangeInfo {
+    pub path: String,
+    pub existed: bool,
+    pub before: Option<String>,
+    pub after: String,
+    pub recorded: bool,
+}
+
+impl FileChangeInfo {
+    pub fn known(&self) -> bool {
+        self.recorded && (!self.existed || self.before.is_some())
+    }
+}
+
+const MAX_SNAPSHOT_BYTES: u64 = 4 * 1024 * 1024;
+
+fn snapshot(abs: &Path) -> Result<Option<String>, ()> {
+    let meta = match fs::metadata(abs) {
+        Ok(m) => m,
+        Err(_) => return Ok(None),
+    };
+    if !meta.is_file() || meta.len() > MAX_SNAPSHOT_BYTES {
+        return Err(());
+    }
+    fs::read_to_string(abs).map(Some).map_err(|_| ())
+}
+
 fn resolve(root: Option<&str>, path: &str) -> PathBuf {
     let p = Path::new(path);
     if p.is_absolute() {
@@ -231,6 +258,39 @@ pub fn execute(name: &str, args: &Value, root: Option<&str>) -> String {
         Ok(s) => s,
         Err(e) => format!("error: {e}"),
     }
+}
+
+pub fn execute_tracked(
+    name: &str,
+    args: &Value,
+    root: Option<&str>,
+) -> (String, Option<FileChangeInfo>) {
+    if name != "write" && name != "edit" {
+        return (execute(name, args, root), None);
+    }
+
+    let path = args["path"].as_str().unwrap_or("");
+    let abs = resolve(root, path);
+    let existed = abs.exists();
+    let before = snapshot(&abs);
+    let recorded = before.is_ok();
+    let before = before.ok().flatten();
+    let output = match run(name, args, root) {
+        Ok(s) => s,
+        Err(e) => format!("error: {e}"),
+    };
+    if output.starts_with("error:") {
+        return (output, None);
+    }
+    let after = fs::read_to_string(&abs).unwrap_or_default();
+    let info = FileChangeInfo {
+        path: abs.display().to_string(),
+        existed,
+        before,
+        after,
+        recorded,
+    };
+    (output, Some(info))
 }
 
 fn run(name: &str, args: &Value, root: Option<&str>) -> Result<String, String> {

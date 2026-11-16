@@ -57,6 +57,7 @@ export interface Settings {
   theme: string;
   system_prompt: string;
   strip_thinking: boolean;
+  strip_duplicate_tool_results: boolean;
 }
 
 export interface Snapshot {
@@ -76,6 +77,8 @@ export type StreamEvent =
   | { type: "reasoning"; text: string }
   | { type: "reasoningend" }
   | { type: "textstart" }
+  | { type: "approvalstart"; id: string; tool: string; kind: string }
+  | { type: "approvaldelta"; id: string; summary: string; append: string }
   | {
       type: "approval";
       id: string;
@@ -106,4 +109,27 @@ export interface UsageStat {
   window: number;
   cached: number;
   hitRate: number | null;
+}
+
+export interface RollbackFile {
+  kind: string;
+  path: string;
+  action: string;
+  restorable: boolean;
+  reason: string;
+}
+
+export interface RollbackPlan {
+  messages: number;
+  files: RollbackFile[];
+  blocked: string[];
+  restorable: boolean;
+}
+
+export interface RollbackReport {
+  removed: number;
+  restored: string[];
+  deleted: string[];
+  skipped: string[];
+  failed: string[];
 }

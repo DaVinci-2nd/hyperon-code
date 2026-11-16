@@ -1,6 +1,7 @@
 mod approval;
 mod chat;
 mod presets;
+mod rollback;
 mod store;
 mod tools;
 
@@ -10,7 +11,7 @@ use presets::Preset;
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use store::{Message, Project, Provider, Session, Settings, BUILTIN_PROJECT_ID};
+use store::{Database, Message, Part, Project, Provider, Session, Settings, BUILTIN_PROJECT_ID};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, State};
 
@@ -36,6 +37,7 @@ fn approve(state: State<'_, AppState>, id: String, allowed: bool) -> bool {
 #[tauri::command]
 fn cancel_message(state: State<'_, AppState>) {
     state.cancel.store(true, Ordering::Relaxed);
+    state.pending.deny_all();
 }
 
 #[derive(Serialize)]
@@ -238,6 +240,36 @@ fn get_messages_sync(app: AppHandle, session_id: String) -> Result<Vec<Message>,
     get_messages(app, session_id)
 }
 
+#[tauri::command]
+fn rollback_preview(
+    app: AppHandle,
+    session_id: String,
+    message_id: String,
+) -> Result<rollback::RollbackPlan, String> {
+    let db = store::load(&app);
+    rollback::preview(&db, &session_id, &message_id).ok_or_else(|| "消息不存在".to_string())
+}
+
+#[tauri::command]
+fn rollback_apply(
+    app: AppHandle,
+    session_id: String,
+    message_id: String,
+    force: bool,
+) -> Result<rollback::RollbackReport, String> {
+    let mut db = store::load(&app);
+    if !force {
+        if let Some(plan) = rollback::preview(&db, &session_id, &message_id) {
+            if !plan.restorable {
+                return Err("部分文件无法还原，需确认后才能回溯".to_string());
+            }
+        }
+    }
+    let report = rollback::apply(&mut db, &session_id, &message_id)?;
+    store::save(&app, &db);
+    Ok(report)
+}
+
 fn estimate_tokens(text: &str) -> u64 {
     let mut cjk: f64 = 0.0;
     let mut other: f64 = 0.0;
@@ -252,6 +284,149 @@ fn estimate_tokens(text: &str) -> u64 {
         }
     }
     (cjk * 0.6 + other * 0.3).round() as u64
+}
+
+fn build_history(
+    db: &Database,
+    session_id: &str,
+    protocol: &str,
+    strip_thinking: bool,
+    strip_duplicates: bool,
+) -> Vec<ChatMessage> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::collections::HashMap;
+    use std::hash::{Hash, Hasher};
+
+    let mut out: Vec<ChatMessage> = Vec::new();
+    let mut seen: HashMap<u64, usize> = HashMap::new();
+    let mut call_seq: usize = 0;
+
+    for m in db.messages.iter().filter(|m| m.session_id == session_id) {
+        if m.role != "assistant" {
+            out.push(ChatMessage::text(&m.role, &m.content));
+            continue;
+        }
+
+        let reasoning = if strip_thinking || m.reasoning.is_empty() {
+            None
+        } else {
+            Some(m.reasoning.clone())
+        };
+
+        let tool_parts: Vec<&Part> = m
+            .parts
+            .iter()
+            .filter(|p| p.kind == "tool" && !p.tool_name.is_empty())
+            .collect();
+
+        if tool_parts.is_empty() {
+            if m.content.is_empty() && reasoning.is_none() {
+                continue;
+            }
+            out.push(ChatMessage::with_reasoning("assistant", &m.content, reasoning));
+            continue;
+        }
+
+        let mut calls: Vec<serde_json::Value> = Vec::new();
+        let mut results: Vec<(String, String, String)> = Vec::new();
+        for p in &tool_parts {
+            call_seq += 1;
+            let id = if p.tool_call_id.is_empty() {
+                format!("call_{call_seq}")
+            } else {
+                p.tool_call_id.clone()
+            };
+            let args = if p.tool_args.is_empty() {
+                "{}".to_string()
+            } else {
+                p.tool_args.clone()
+            };
+            calls.push(serde_json::json!({
+                "id": id,
+                "type": "function",
+                "function": {
+                    "name": p.tool_name.clone(),
+                    "arguments": args
+                }
+            }));
+
+            let mut detail = p.detail.clone();
+            if strip_duplicates && !detail.is_empty() {
+                let mut hasher = DefaultHasher::new();
+                detail.hash(&mut hasher);
+                let hash = hasher.finish();
+                if let Some(first) = seen.get(&hash) {
+                    detail = format!(
+                        "[重复工具结果，与第 {first} 次相同，已省略 {} 字节]",
+                        p.detail.len()
+                    );
+                } else {
+                    seen.insert(hash, call_seq);
+                }
+            }
+            results.push((id, p.tool_name.clone(), detail));
+        }
+
+        out.push(ChatMessage {
+            role: "assistant".to_string(),
+            content: m.content.clone(),
+            reasoning,
+            tool_calls: Some(serde_json::Value::Array(calls)),
+            tool_call_id: None,
+        });
+
+        let first_id = results.first().map(|r| r.0.clone()).unwrap_or_default();
+        if protocol == "anthropic" {
+            let blocks: Vec<serde_json::Value> = results
+                .iter()
+                .map(|(id, _, detail)| {
+                    serde_json::json!({
+                        "type": "tool_result",
+                        "tool_use_id": id,
+                        "content": detail
+                    })
+                })
+                .collect();
+            out.push(ChatMessage {
+                role: "user".to_string(),
+                content: serde_json::Value::Array(blocks).to_string(),
+                reasoning: None,
+                tool_calls: None,
+                tool_call_id: Some(first_id),
+            });
+        } else if protocol == "gemini" {
+            let parts: Vec<serde_json::Value> = results
+                .iter()
+                .map(|(_, name, detail)| {
+                    serde_json::json!({
+                        "functionResponse": {
+                            "name": name,
+                            "response": { "result": detail }
+                        }
+                    })
+                })
+                .collect();
+            out.push(ChatMessage {
+                role: "user".to_string(),
+                content: serde_json::Value::Array(parts).to_string(),
+                reasoning: None,
+                tool_calls: None,
+                tool_call_id: Some(first_id),
+            });
+        } else {
+            for (id, _, detail) in results {
+                out.push(ChatMessage {
+                    role: "tool".to_string(),
+                    content: detail,
+                    reasoning: None,
+                    tool_calls: None,
+                    tool_call_id: Some(id),
+                });
+            }
+        }
+    }
+
+    out
 }
 
 #[tauri::command]
@@ -279,29 +454,15 @@ fn estimate_context(
     };
     total += estimate_tokens(&tools_json.to_string());
 
-    for m in db.messages.iter().filter(|m| m.session_id == session_id) {
-        if m.parts.is_empty() {
-            total += estimate_tokens(&m.content);
-            if m.role == "assistant" && !strip_thinking {
-                total += estimate_tokens(&m.reasoning);
-            }
-        } else {
-            for p in &m.parts {
-                match p.kind.as_str() {
-                    "think" => {
-                        if !strip_thinking {
-                            total += estimate_tokens(&p.text);
-                        }
-                    }
-                    "tool" => {
-                        total += estimate_tokens(&p.summary);
-                        total += estimate_tokens(&p.detail);
-                    }
-                    _ => total += estimate_tokens(&p.text),
-                }
-            }
-        }
-        total += 4;
+    let history = build_history(
+        &db,
+        &session_id,
+        &protocol,
+        strip_thinking,
+        db.settings.strip_duplicate_tool_results,
+    );
+    for m in &history {
+        total += estimate_tokens(&serde_json::to_string(m).unwrap_or_default());
     }
     let window = db
         .providers
@@ -336,11 +497,19 @@ async fn send_message(
     channel: Channel<chat::StreamEvent>,
 ) -> Result<String, String> {
     state.cancel.store(false, Ordering::Relaxed);
-    {
+
+    let assistant_id = store::new_id();
+    let (provider, mut history, root, system_prompt) = {
         let mut db = store::load(&app);
         if !db.sessions.iter().any(|s| s.id == session_id) {
             return Err("会话不存在".to_string());
         }
+        let provider = db
+            .providers
+            .iter()
+            .find(|p| p.id == provider_id)
+            .cloned()
+            .ok_or_else(|| "模型未配置".to_string())?;
         db.messages.push(Message {
             id: store::new_id(),
             session_id: session_id.clone(),
@@ -355,47 +524,20 @@ async fn send_message(
                 s.title = content.chars().take(20).collect();
             }
         }
-        store::save(&app, &db);
-    }
-
-    let db = store::load(&app);
-    let provider = db
-        .providers
-        .iter()
-        .find(|p| p.id == provider_id)
-        .cloned()
-        .ok_or_else(|| "模型未配置".to_string())?;
-
-    let strip = db.settings.strip_thinking;
-    let mut history: Vec<ChatMessage> = db
-        .messages
-        .iter()
-        .filter(|m| m.session_id == session_id)
-        .map(|m| {
-            if m.role == "assistant" {
-                let reasoning = if strip {
-                    String::new()
-                } else {
-                    m.reasoning.clone()
-                };
-                ChatMessage::with_reasoning(&m.role, &m.content, Some(reasoning))
-            } else {
-                ChatMessage::text(&m.role, &m.content)
-            }
-        })
-        .collect();
-
-    let root = db
-        .sessions
-        .iter()
-        .find(|s| s.id == session_id)
-        .and_then(|s| db.projects.iter().find(|p| p.id == s.project_id))
-        .and_then(|p| p.dirs.first().cloned());
-
-    let assistant_id = store::new_id();
-    {
-        let mut db2 = store::load(&app);
-        db2.messages.push(Message {
+        let history = build_history(
+            &db,
+            &session_id,
+            &provider.protocol,
+            db.settings.strip_thinking,
+            db.settings.strip_duplicate_tool_results,
+        );
+        let root = db
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .and_then(|s| db.projects.iter().find(|p| p.id == s.project_id))
+            .and_then(|p| p.dirs.first().cloned());
+        db.messages.push(Message {
             id: assistant_id.clone(),
             session_id: session_id.clone(),
             role: "assistant".to_string(),
@@ -404,14 +546,18 @@ async fn send_message(
             parts: Vec::new(),
             created_at: store::now_ms(),
         });
-        store::save(&app, &db2);
-    }
+        store::save(&app, &db);
+        (
+            provider,
+            history,
+            root,
+            db.settings.system_prompt.clone(),
+        )
+    };
 
     let usage_slot: Arc<std::sync::Mutex<Option<(u64, u64)>>> =
         Arc::new(std::sync::Mutex::new(None));
     let usage_tap = usage_slot.clone();
-    let usage_app = app.clone();
-    let usage_session = session_id.clone();
 
     let sink = Arc::new(move |event: chat::StreamEvent| {
         if let chat::StreamEvent::Usage {
@@ -422,14 +568,6 @@ async fn send_message(
         {
             if let Ok(mut slot) = usage_tap.lock() {
                 *slot = Some((*prompt_tokens, *cached_tokens));
-            }
-            let mut db = store::load(&usage_app);
-            if let Some(s) = db.sessions.iter_mut().find(|s| s.id == usage_session) {
-                if s.last_prompt_tokens != *prompt_tokens || s.last_cached_tokens != *cached_tokens {
-                    s.last_prompt_tokens = *prompt_tokens;
-                    s.last_cached_tokens = *cached_tokens;
-                    store::save(&usage_app, &db);
-                }
             }
         }
         let _ = channel.send(event);
@@ -444,7 +582,7 @@ async fn send_message(
     let result = chat::stream(
         &provider,
         &mut history,
-        &db.settings.system_prompt,
+        &system_prompt,
         sink,
         &ctx,
     )
@@ -457,6 +595,20 @@ async fn send_message(
                 m.content = acc.content.clone();
                 m.reasoning = acc.reasoning.clone();
                 m.parts = acc.parts.clone();
+            }
+            let created = store::now_ms();
+            for change in &acc.changes {
+                db3.changes.push(store::FileChange {
+                    id: store::new_id(),
+                    session_id: session_id.clone(),
+                    message_id: assistant_id.clone(),
+                    path: change.path.clone(),
+                    existed: change.existed,
+                    before: change.before.clone(),
+                    known: change.known(),
+                    after: change.after.clone(),
+                    created_at: created,
+                });
             }
             if let Ok(slot) = usage_slot.lock() {
                 if let Some((prompt, cached)) = *slot {
@@ -500,6 +652,8 @@ pub fn run() {
             delete_session,
             get_messages,
             get_messages_sync,
+            rollback_preview,
+            rollback_apply,
             estimate_context,
             approve,
             cancel_message,

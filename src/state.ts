@@ -25,6 +25,7 @@ export const state = {
     theme: "dark",
     system_prompt: "",
     strip_thinking: true,
+    strip_duplicate_tool_results: true,
   } as Settings,
 
   currentProjectId: null as string | null,

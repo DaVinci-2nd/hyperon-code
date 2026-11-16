@@ -153,6 +153,29 @@ function buildPromptPane(): HTMLElement {
   return pane;
 }
 
+function switchRow(
+  name: string,
+  desc: string,
+  on: boolean,
+  onChange: (value: boolean) => Promise<void>
+): HTMLElement {
+  const row = el("div", "setting-row");
+  const textWrap = el("div", "setting-text");
+  textWrap.appendChild(el("div", "setting-name", name));
+  textWrap.appendChild(el("div", "setting-desc", desc));
+  row.appendChild(textWrap);
+
+  const toggle = el("button", "switch");
+  if (on) toggle.classList.add("is-on");
+  toggle.addEventListener("click", async () => {
+    const next = !toggle.classList.contains("is-on");
+    toggle.classList.toggle("is-on", next);
+    await onChange(next);
+  });
+  row.appendChild(toggle);
+  return row;
+}
+
 function buildSendPane(): HTMLElement {
   const pane = el("div", "settings-pane");
 
@@ -160,23 +183,29 @@ function buildSendPane(): HTMLElement {
   head.appendChild(el("div", "settings-title", "发送"));
   pane.appendChild(head);
 
-  const row = el("div", "setting-row");
-  const textWrap = el("div", "setting-text");
-  textWrap.appendChild(el("div", "setting-name", "发送时剔除思考内容"));
-  textWrap.appendChild(
-    el("div", "setting-desc", "把历史 AI 思考在发送时置空，本地记录保留")
+  pane.appendChild(
+    switchRow(
+      "发送时剔除思考内容",
+      "把历史 AI 思考在发送时置空，本地记录保留",
+      state.settings.strip_thinking,
+      async (value) => {
+        state.settings.strip_thinking = value;
+        await api.saveSettings(state.settings);
+      }
+    )
   );
-  row.appendChild(textWrap);
 
-  const toggle = el("button", "switch");
-  if (state.settings.strip_thinking) toggle.classList.add("is-on");
-  toggle.addEventListener("click", async () => {
-    state.settings.strip_thinking = !state.settings.strip_thinking;
-    toggle.classList.toggle("is-on", state.settings.strip_thinking);
-    await api.saveSettings(state.settings);
-  });
-  row.appendChild(toggle);
-  pane.appendChild(row);
+  pane.appendChild(
+    switchRow(
+      "发送时剔除重复的返回结果",
+      "历史里完全相同的工具结果只保留第一次，其余用占位替代",
+      state.settings.strip_duplicate_tool_results,
+      async (value) => {
+        state.settings.strip_duplicate_tool_results = value;
+        await api.saveSettings(state.settings);
+      }
+    )
+  );
 
   return pane;
 }

@@ -2,6 +2,7 @@ import { renderMarkdown, renderMarkdownTail } from "../markdown";
 import { state } from "../state";
 import type { Part } from "../types";
 import { el } from "./dom";
+import { openRollback } from "./rollback";
 
 const INITIAL_LIMIT = 30;
 
@@ -109,9 +110,36 @@ function partNode(p: Part): HTMLElement {
 }
 
 interface MessageLike {
+  id?: string;
   content: string;
   reasoning?: string;
   parts?: Part[];
+}
+
+function rerenderMessages(): void {
+  const box = document.getElementById("messages");
+  if (!box) return;
+  const next = buildMessages();
+  box.replaceWith(next);
+  requestAnimationFrame(() => {
+    next.scrollTop = next.scrollHeight;
+    bindFollow();
+  });
+}
+
+function rollbackButton(messageId: string): HTMLElement {
+  const btn = el("button", "rollback-btn", "回溯");
+  btn.title = "回溯到这条消息之前，并还原文件改动";
+  if (state.streaming) {
+    btn.classList.add("is-disabled");
+    btn.disabled = true;
+    btn.title = "正在生成回复，暂不能回溯";
+    return btn;
+  }
+  btn.addEventListener("click", () => {
+    void openRollback(messageId, rerenderMessages);
+  });
+  return btn;
 }
 
 function messageRow(role: string, message?: MessageLike): HTMLElement {
@@ -148,7 +176,17 @@ function messageRow(role: string, message?: MessageLike): HTMLElement {
     }
   }
 
-  row.appendChild(holder);
+  if (role === "user") {
+    const wrap = el("div", "msg-col");
+    wrap.appendChild(holder);
+    const id = message?.id ?? "";
+    if (id && !id.startsWith("pending")) {
+      wrap.appendChild(rollbackButton(id));
+    }
+    row.appendChild(wrap);
+  } else {
+    row.appendChild(holder);
+  }
   return row;
 }
 

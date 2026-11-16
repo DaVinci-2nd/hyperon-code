@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 
@@ -13,6 +14,8 @@ pub struct Settings {
     pub system_prompt: String,
     #[serde(default = "default_strip")]
     pub strip_thinking: bool,
+    #[serde(default = "default_true")]
+    pub strip_duplicate_tool_results: bool,
 }
 
 fn default_theme() -> String {
@@ -20,6 +23,10 @@ fn default_theme() -> String {
 }
 
 fn default_strip() -> bool {
+    true
+}
+
+fn default_true() -> bool {
     true
 }
 
@@ -39,6 +46,7 @@ impl Default for Settings {
             theme: default_theme(),
             system_prompt: default_prompt(),
             strip_thinking: default_strip(),
+            strip_duplicate_tool_results: default_true(),
         }
     }
 }
@@ -104,6 +112,34 @@ pub struct Part {
     pub detail: String,
     #[serde(default)]
     pub ok: bool,
+    #[serde(default)]
+    pub tool_call_id: String,
+    #[serde(default)]
+    pub tool_name: String,
+    #[serde(default)]
+    pub tool_args: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileChange {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub session_id: String,
+    #[serde(default)]
+    pub message_id: String,
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub existed: bool,
+    #[serde(default)]
+    pub before: Option<String>,
+    #[serde(default = "default_true")]
+    pub known: bool,
+    #[serde(default)]
+    pub after: String,
+    #[serde(default)]
+    pub created_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,6 +172,8 @@ pub struct Database {
     pub sessions: Vec<Session>,
     #[serde(default)]
     pub messages: Vec<Message>,
+    #[serde(default)]
+    pub changes: Vec<FileChange>,
 }
 
 impl Default for Database {
@@ -151,6 +189,7 @@ impl Default for Database {
             }],
             sessions: Vec::new(),
             messages: Vec::new(),
+            changes: Vec::new(),
         }
     }
 }
@@ -222,6 +261,16 @@ fn parse_lenient(text: &str) -> Option<Database> {
         }
     }
 
+    if let Some(list) = value.get("changes").and_then(|v| v.as_array()) {
+        let parsed: Vec<FileChange> = list
+            .iter()
+            .filter_map(|item| serde_json::from_value(item.clone()).ok())
+            .collect();
+        if !parsed.is_empty() {
+            db.changes = parsed;
+        }
+    }
+
     Some(db)
 }
 
@@ -256,24 +305,31 @@ pub fn load(app: &AppHandle) -> Database {
 
 pub fn save(app: &AppHandle, db: &Database) {
     let path = data_file(app);
-    let text = match serde_json::to_string_pretty(db) {
-        Ok(t) => t,
-        Err(_) => return,
-    };
-
     let tmp = path.with_file_name("data.json.tmp");
-    if fs::write(&tmp, &text).is_ok() && fs::rename(&tmp, &path).is_ok() {
+
+    if write_json(&tmp, db) && fs::rename(&tmp, &path).is_ok() {
         return;
     }
     let _ = fs::remove_file(&tmp);
 
-    if fs::write(&path, &text).is_ok() {
+    if write_json(&path, db) {
         return;
     }
 
     let stamp = now_ms();
     let fallback = path.with_file_name(format!("data.force-{stamp}.json"));
-    let _ = fs::write(&fallback, &text);
+    let _ = write_json(&fallback, db);
+}
+
+fn write_json(path: &PathBuf, db: &Database) -> bool {
+    let Ok(file) = fs::File::create(path) else {
+        return false;
+    };
+    let mut writer = std::io::BufWriter::new(file);
+    if serde_json::to_writer_pretty(&mut writer, db).is_err() {
+        return false;
+    }
+    writer.flush().is_ok()
 }
 
 pub fn now_ms() -> i64 {
