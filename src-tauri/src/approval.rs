@@ -34,4 +34,17 @@ impl Pending {
             None => false,
         }
     }
+
+    pub fn deny_all(&self) {
+        let senders: Vec<oneshot::Sender<bool>> = {
+            let mut map = match self.map.lock() {
+                Ok(g) => g,
+                Err(_) => return,
+            };
+            map.drain().map(|(_, tx)| tx).collect()
+        };
+        for tx in senders {
+            let _ = tx.send(false);
+        }
+    }
 }

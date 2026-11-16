@@ -1,7 +1,12 @@
 import * as api from "../api";
 import { state, rememberComposer } from "../state";
 import type { Part } from "../types";
-import { openApproval } from "./approval";
+import {
+  beginApproval,
+  closeApproval,
+  openApproval,
+  streamApproval,
+} from "./approval";
 import {
   appendStreamingRow,
   patchStreamingRow,
@@ -168,6 +173,10 @@ export function buildComposer(onDone: () => void): HTMLElement {
     await refreshUsageInto(usageTag);
   };
 
+  window.addEventListener("hyperon:refresh-usage", () => {
+    void refresh();
+  });
+
   void refresh();
 
   const doSend = async (): Promise<void> => {
@@ -238,6 +247,10 @@ export function buildComposer(onDone: () => void): HTMLElement {
           if (!current || current.kind !== "text") pushPart("text");
           current!.text += event.text;
           schedule(parts.length - 1);
+        } else if (event.type === "approvalstart") {
+          beginApproval(event);
+        } else if (event.type === "approvaldelta") {
+          streamApproval(event);
         } else if (event.type === "approval") {
           openApproval(event);
         } else if (event.type === "toolend") {
@@ -271,6 +284,7 @@ export function buildComposer(onDone: () => void): HTMLElement {
       schedule(parts.length - 1);
     } finally {
       state.streaming = false;
+      closeApproval();
       setSendIdle();
       onDone();
       void refresh();
