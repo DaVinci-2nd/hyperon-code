@@ -56,7 +56,65 @@ function buildDiffElement(diffText: string): HTMLElement {
   return diff;
 }
 
+function subagentHead(part: Part): string {
+  const mark = part.running ? "…" : part.ok ? "✓" : "✕";
+  return `${mark} ${part.summary || "子代理"}`;
+}
+
+function fillSubagentFlow(flow: HTMLElement, part: Part): void {
+  flow.replaceChildren();
+  const children = part.children ?? [];
+  children.forEach((child) => {
+    if (child.kind === "think") {
+      const body = el("div", "subagent-think");
+      body.innerHTML = renderMarkdown(child.text || "…");
+      flow.appendChild(body);
+      return;
+    }
+    if (child.kind === "tool") {
+      const wrap = el("div", "subagent-tool");
+      wrap.appendChild(
+        el(
+          "div",
+          "subagent-tool-line",
+          `${child.ok ? "✓" : "✕"} ${child.summary}`
+        )
+      );
+      if (child.detail) {
+        const pre = el("pre", "subagent-tool-output");
+        pre.textContent = child.detail;
+        wrap.appendChild(pre);
+      }
+      flow.appendChild(wrap);
+      return;
+    }
+    const body = el("div", "subagent-text");
+    body.innerHTML = renderMarkdown(child.text || "…");
+    flow.appendChild(body);
+  });
+
+  if (children.length === 0) {
+    flow.appendChild(
+      el("div", "empty-hint", part.running ? "运行中…" : "无输出")
+    );
+  }
+
+  const box = flow.closest(".fold-body") as HTMLElement | null;
+  if (box) {
+    requestAnimationFrame(() => {
+      box.scrollTop = box.scrollHeight;
+    });
+  }
+}
+
+function subagentPart(part: Part): HTMLElement {
+  const flow = el("div", "subagent-flow");
+  fillSubagentFlow(flow, part);
+  return foldBlock(subagentHead(part), flow, "subagent-block");
+}
+
 function toolPart(part: Part): HTMLElement {
+  if (part.tool_name === "agent") return subagentPart(part);
   const body = el("div", "tool-body");
   const MARKER = "---diff---";
 
@@ -325,6 +383,13 @@ export function patchStreamingRow(row: HTMLElement, patch: StreamPatch): void {
       body.scrollTop = body.scrollHeight;
     }
   } else if (patch.part.kind === "tool") {
+    if (patch.part.tool_name === "agent") {
+      const head = node.querySelector(".fold-head") as HTMLElement | null;
+      if (head) head.textContent = subagentHead(patch.part);
+      const flow = node.querySelector(".subagent-flow") as HTMLElement | null;
+      if (flow) fillSubagentFlow(flow, patch.part);
+      return;
+    }
     const fresh = partNode(patch.part);
     fresh.dataset.part = String(patch.index);
     node.replaceWith(fresh);

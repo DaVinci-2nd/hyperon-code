@@ -8,6 +8,7 @@ const KIND_LABEL: Record<string, string> = {
   bash: "执行命令",
   fetch: "获取网页",
   read: "读取",
+  agent: "子代理（只读）",
 };
 
 const STREAM_LIMIT = 20_000;

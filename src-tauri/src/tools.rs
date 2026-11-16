@@ -9,6 +9,8 @@ pub struct ToolSpec {
     pub params: &'static str,
 }
 
+pub const AGENT_TOOL: &str = "agent";
+
 pub const TOOLS: &[ToolSpec] = &[
     ToolSpec {
         name: "read",
@@ -50,15 +52,37 @@ pub const TOOLS: &[ToolSpec] = &[
         desc: "取网页",
         params: r#"{"type":"object","properties":{"url":{"type":"string"}},"required":["url"]}"#,
     },
+    ToolSpec {
+        name: "agent",
+        desc: "子代理（只读）",
+        params: r#"{"type":"object","properties":{"prompt":{"type":"string"}},"required":["prompt"]}"#,
+    },
 ];
 
-pub fn needs_approval(_tool: &str) -> bool {
-    true
+pub fn is_readonly(tool: &str) -> bool {
+    matches!(tool, "read" | "list" | "find" | "grep" | "fetch")
 }
 
-pub fn openai_tools() -> Value {
-    let list: Vec<Value> = TOOLS
-        .iter()
+pub fn needs_approval(tool: &str) -> bool {
+    tool != "agent"
+}
+
+pub fn title(text: &str) -> String {
+    text.lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .chars()
+        .take(20)
+        .collect()
+}
+
+fn tool_specs(readonly: bool) -> impl Iterator<Item = &'static ToolSpec> {
+    TOOLS.iter().filter(move |t| !readonly || is_readonly(t.name))
+}
+
+pub fn openai_tools(readonly: bool) -> Value {
+    let list: Vec<Value> = tool_specs(readonly)
         .map(|t| {
             json!({
                 "type": "function",
@@ -73,9 +97,8 @@ pub fn openai_tools() -> Value {
     Value::Array(list)
 }
 
-pub fn anthropic_tools() -> Value {
-    let list: Vec<Value> = TOOLS
-        .iter()
+pub fn anthropic_tools(readonly: bool) -> Value {
+    let list: Vec<Value> = tool_specs(readonly)
         .map(|t| {
             json!({
                 "name": t.name,
@@ -87,9 +110,8 @@ pub fn anthropic_tools() -> Value {
     Value::Array(list)
 }
 
-pub fn gemini_tools() -> Value {
-    let list: Vec<Value> = TOOLS
-        .iter()
+pub fn gemini_tools(readonly: bool) -> Value {
+    let list: Vec<Value> = tool_specs(readonly)
         .map(|t| {
             json!({
                 "name": t.name,
@@ -189,6 +211,19 @@ pub fn preview(name: &str, args: &Value, root: Option<&str>) -> ApprovalPreview 
             detail: String::new(),
             kind: "fetch".to_string(),
         },
+        "agent" => {
+            let prompt = args["prompt"].as_str().unwrap_or("");
+            let brief = title(prompt);
+            ApprovalPreview {
+                summary: if brief.is_empty() {
+                    "子代理".to_string()
+                } else {
+                    format!("子代理 · {brief}")
+                },
+                detail: prompt.to_string(),
+                kind: "agent".to_string(),
+            }
+        }
         _ => ApprovalPreview {
             summary: format!("{name} {}", serde_json::to_string(args).unwrap_or_default()),
             detail: String::new(),

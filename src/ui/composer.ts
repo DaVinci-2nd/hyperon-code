@@ -208,19 +208,34 @@ export function buildComposer(onDone: () => void): HTMLElement {
     const row = appendStreamingRow();
     const parts: Part[] = [];
     let current: Part | null = null;
+    const subagentIndex = new Map<string, number>();
+
+    const activeSubagent = (
+      id: string
+    ): { index: number; children: Part[] } | null => {
+      const index = subagentIndex.get(id);
+      if (index === undefined) return null;
+      const part = parts[index];
+      if (!part || !part.children) return null;
+      return { index, children: part.children };
+    };
 
     let frame = 0;
-    let dirtyIndex = -1;
+    const dirty = new Set<number>();
     const flush = (): void => {
       frame = 0;
-      if (row && dirtyIndex >= 0 && dirtyIndex < parts.length) {
-        patchStreamingRow(row, { index: dirtyIndex, part: parts[dirtyIndex] });
+      if (row) {
+        dirty.forEach((index) => {
+          if (index >= 0 && index < parts.length) {
+            patchStreamingRow(row, { index, part: parts[index] });
+          }
+        });
       }
-      dirtyIndex = -1;
+      dirty.clear();
       requestScroll();
     };
     const schedule = (index: number): void => {
-      dirtyIndex = index;
+      dirty.add(index);
       if (!frame) frame = requestAnimationFrame(flush);
     };
 
@@ -253,16 +268,96 @@ export function buildComposer(onDone: () => void): HTMLElement {
           streamApproval(event);
         } else if (event.type === "approval") {
           openApproval(event);
-        } else if (event.type === "toolend") {
+        } else if (event.type === "subagentstart") {
           parts.push({
             kind: "tool",
             text: "",
-            summary: event.summary,
-            detail: event.detail,
-            ok: event.ok,
+            summary: event.title ? `子代理 · ${event.title}` : "子代理",
+            detail: "",
+            ok: true,
+            tool_name: "agent",
+            tool_args: "",
+            children: [],
+            running: true,
           });
+          subagentIndex.set(event.id, parts.length - 1);
           current = null;
           schedule(parts.length - 1);
+        } else if (event.type === "subagentreasoning") {
+          const item = activeSubagent(event.id);
+          if (item) {
+            const last = item.children[item.children.length - 1];
+            if (last && last.kind === "think") {
+              last.text += event.text;
+            } else {
+              item.children.push({
+                kind: "think",
+                text: event.text,
+                summary: "",
+                detail: "",
+                ok: true,
+              });
+            }
+            schedule(item.index);
+          }
+        } else if (event.type === "subagentdelta") {
+          const item = activeSubagent(event.id);
+          if (item) {
+            const last = item.children[item.children.length - 1];
+            if (last && last.kind === "text") {
+              last.text += event.text;
+            } else {
+              item.children.push({
+                kind: "text",
+                text: event.text,
+                summary: "",
+                detail: "",
+                ok: true,
+              });
+            }
+            schedule(item.index);
+          }
+        } else if (event.type === "subagenttool") {
+          const item = activeSubagent(event.id);
+          if (item) {
+            item.children.push({
+              kind: "tool",
+              text: "",
+              summary: event.summary,
+              detail: event.detail,
+              ok: event.ok,
+            });
+            schedule(item.index);
+          }
+        } else if (event.type === "subagentend") {
+          const index = subagentIndex.get(event.id);
+          const part = index === undefined ? null : parts[index];
+          if (index !== undefined && part) {
+            part.ok = event.ok;
+            part.running = false;
+            schedule(index);
+          }
+        } else if (event.type === "toolend") {
+          const index =
+            event.tool === "agent" ? subagentIndex.get(event.id) : undefined;
+          const agentPart = index === undefined ? null : parts[index];
+          if (index !== undefined && agentPart) {
+            agentPart.summary = event.summary;
+            agentPart.detail = event.detail;
+            agentPart.ok = event.ok;
+            agentPart.running = false;
+            schedule(index);
+          } else {
+            parts.push({
+              kind: "tool",
+              text: "",
+              summary: event.summary,
+              detail: event.detail,
+              ok: event.ok,
+            });
+            current = null;
+            schedule(parts.length - 1);
+          }
         } else if (event.type === "usage") {
           paint(
             sessionId,

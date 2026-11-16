@@ -3,6 +3,7 @@ mod chat;
 mod presets;
 mod rollback;
 mod store;
+mod subagent;
 mod tools;
 
 use approval::Pending;
@@ -458,9 +459,9 @@ fn estimate_context(
         .map(|p| p.protocol.clone())
         .unwrap_or_else(|| "openai".to_string());
     let tools_json = match protocol.as_str() {
-        "anthropic" => tools::anthropic_tools(),
-        "gemini" => tools::gemini_tools(),
-        _ => tools::openai_tools(),
+        "anthropic" => tools::anthropic_tools(false),
+        "gemini" => tools::gemini_tools(false),
+        _ => tools::openai_tools(false),
     };
     total += estimate_tokens(&tools_json.to_string());
 
@@ -509,7 +510,7 @@ async fn send_message(
     state.cancel.store(false, Ordering::Relaxed);
 
     let assistant_id = store::new_id();
-    let (provider, mut history, root, system_prompt) = {
+    let (provider, mut history, root, system_prompt, subagent_prompt) = {
         let mut db = store::load(&app);
         if !db.sessions.iter().any(|s| s.id == session_id) {
             return Err("会话不存在".to_string());
@@ -562,6 +563,7 @@ async fn send_message(
             history,
             root,
             db.settings.system_prompt.clone(),
+            db.settings.subagent_prompt.clone(),
         )
     };
 
@@ -587,6 +589,8 @@ async fn send_message(
         root,
         pending: state.pending.clone(),
         cancel: state.cancel.clone(),
+        readonly: false,
+        subagent_prompt,
     };
 
     let result = chat::stream(

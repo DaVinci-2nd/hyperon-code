@@ -12,6 +12,8 @@ pub struct Settings {
     pub theme: String,
     #[serde(default = "default_prompt")]
     pub system_prompt: String,
+    #[serde(default = "default_subagent_prompt")]
+    pub subagent_prompt: String,
     #[serde(default = "default_strip")]
     pub strip_thinking: bool,
     #[serde(default = "default_true")]
@@ -40,11 +42,22 @@ fn default_prompt() -> String {
     DEFAULT_PROMPT.to_string()
 }
 
+pub const DEFAULT_SUBAGENT_PROMPT: &str = "你是子代理，你必须总是遵循规范：
+只读环境，用接主输入语言输出正文，深入反复思考，反复确认，多用工具验证事实，自主完成任务，不得猜测，正文篇幅要极简，少废话，理性，中立，严格遵循主输入要求，正文不得先说结论，正文必须先列举和分析，最后才能说结论，只允许执行只读行动，行动时想好再调用工具，不得随意，禁止执行增删改写操作
+回复规范：
+正文只输出必要内容和重要内容列举以及完整结果，不得主动放弃，不得输出无关内容，不得做与主输入意愿不符的事情，需顺应主输入意愿
+每次思考反复确认以上要求是否做到";
+
+fn default_subagent_prompt() -> String {
+    DEFAULT_SUBAGENT_PROMPT.to_string()
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
             theme: default_theme(),
             system_prompt: default_prompt(),
+            subagent_prompt: default_subagent_prompt(),
             strip_thinking: default_strip(),
             strip_duplicate_tool_results: default_true(),
         }
@@ -118,6 +131,8 @@ pub struct Part {
     pub tool_name: String,
     #[serde(default)]
     pub tool_args: String,
+    #[serde(default)]
+    pub children: Vec<Part>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -288,6 +303,9 @@ pub fn load(app: &AppHandle) -> Database {
     };
     if db.settings.system_prompt.is_empty() {
         db.settings.system_prompt = DEFAULT_PROMPT.to_string();
+    }
+    if db.settings.subagent_prompt.is_empty() {
+        db.settings.subagent_prompt = DEFAULT_SUBAGENT_PROMPT.to_string();
     }
     if !db.projects.iter().any(|p| p.id == BUILTIN_PROJECT_ID) {
         db.projects.insert(

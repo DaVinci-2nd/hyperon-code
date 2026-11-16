@@ -133,14 +133,21 @@ function buildPromptPane(): HTMLElement {
   head.appendChild(el("div", "settings-title", "提示词"));
   pane.appendChild(head);
 
+  pane.appendChild(el("div", "prompt-label", "系统提示词"));
   const area = el("textarea", "prompt-area");
   area.value = state.settings.system_prompt;
   pane.appendChild(area);
+
+  pane.appendChild(el("div", "prompt-label", "子代理系统提示词"));
+  const subArea = el("textarea", "prompt-area short");
+  subArea.value = state.settings.subagent_prompt;
+  pane.appendChild(subArea);
 
   const bar = el("div", "settings-actions");
   const save = el("button", "btn btn-primary", "保存");
   save.addEventListener("click", async () => {
     state.settings.system_prompt = area.value;
+    state.settings.subagent_prompt = subArea.value;
     await api.saveSettings(state.settings);
     save.textContent = "已保存";
     setTimeout(() => {

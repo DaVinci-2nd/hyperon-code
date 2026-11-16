@@ -6,6 +6,10 @@ export interface Part {
   summary: string;
   detail: string;
   ok: boolean;
+  tool_name?: string;
+  tool_args?: string;
+  children?: Part[];
+  running?: boolean;
 }
 
 export interface Message {
@@ -56,6 +60,7 @@ export interface Preset {
 export interface Settings {
   theme: string;
   system_prompt: string;
+  subagent_prompt: string;
   strip_thinking: boolean;
   strip_duplicate_tool_results: boolean;
 }
@@ -101,6 +106,17 @@ export type StreamEvent =
       cached_tokens: number;
       context_window: number;
     }
+  | { type: "subagentstart"; id: string; title: string }
+  | { type: "subagentreasoning"; id: string; text: string }
+  | { type: "subagentdelta"; id: string; text: string }
+  | {
+      type: "subagenttool";
+      id: string;
+      summary: string;
+      detail: string;
+      ok: boolean;
+    }
+  | { type: "subagentend"; id: string; ok: boolean }
   | { type: "done" }
   | { type: "error"; message: string };
 

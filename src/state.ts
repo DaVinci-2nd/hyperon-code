@@ -24,6 +24,7 @@ export const state = {
   settings: {
     theme: "dark",
     system_prompt: "",
+    subagent_prompt: "",
     strip_thinking: true,
     strip_duplicate_tool_results: true,
   } as Settings,

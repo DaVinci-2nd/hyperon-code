@@ -1,8 +1,9 @@
 use crate::approval::Pending;
 use crate::presets;
 use crate::store::{Part, Provider};
+use crate::subagent;
 use crate::tools::{self, FileChangeInfo};
-use futures_util::StreamExt;
+use futures_util::{future::join_all, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -47,6 +48,28 @@ pub enum StreamEvent {
         prompt_tokens: u64,
         cached_tokens: u64,
         context_window: u64,
+    },
+    SubagentStart {
+        id: String,
+        title: String,
+    },
+    SubagentReasoning {
+        id: String,
+        text: String,
+    },
+    SubagentDelta {
+        id: String,
+        text: String,
+    },
+    SubagentTool {
+        id: String,
+        summary: String,
+        detail: String,
+        ok: bool,
+    },
+    SubagentEnd {
+        id: String,
+        ok: bool,
     },
     Done,
     Error { message: String },
@@ -138,6 +161,8 @@ pub struct Ctx {
     pub root: Option<String>,
     pub pending: Arc<Pending>,
     pub cancel: Arc<AtomicBool>,
+    pub readonly: bool,
+    pub subagent_prompt: String,
 }
 
 pub async fn stream(
@@ -182,16 +207,30 @@ pub async fn stream(
 
         messages.push(build_assistant_call(&round.content, &calls));
 
-        for call in &calls {
+        let mut i = 0;
+        while i < calls.len() {
             if ctx.cancel.load(Ordering::Relaxed) {
                 sink(StreamEvent::Done);
                 return Ok(total);
             }
 
+            if calls[i].name == tools::AGENT_TOOL && !ctx.readonly {
+                let mut j = i;
+                while j < calls.len() && calls[j].name == tools::AGENT_TOOL {
+                    j += 1;
+                }
+                run_agent_batch(provider, &calls[i..j], &sink, ctx, &mut total, messages).await;
+                i = j;
+                continue;
+            }
+
+            let call = &calls[i];
             total.tool_calls.push(call.clone());
 
             let preview = tools::preview(&call.name, &call.args, ctx.root.as_deref());
-            let approved = if tools::needs_approval(&call.name) {
+            let approved = if ctx.readonly {
+                true
+            } else if tools::needs_approval(&call.name) {
                 let id = call.id.clone();
                 if !round.announced.contains(&id) {
                     sink(StreamEvent::ApprovalStart {
@@ -216,14 +255,17 @@ pub async fn stream(
                 true
             };
 
+            let blocked = ctx.readonly && !tools::is_readonly(&call.name);
             let mut produced: Option<FileChangeInfo> = None;
-            let result = if approved {
+            let (result, ok) = if blocked {
+                ("error: 只读环境".to_string(), false)
+            } else if approved {
                 let (text, change) =
                     tools::execute_tracked(&call.name, &call.args, ctx.root.as_deref());
                 produced = change;
-                text
+                (text, true)
             } else {
-                "user denied".to_string()
+                ("user denied".to_string(), false)
             };
             if let Some(info) = produced {
                 total.changes.push(info);
@@ -234,10 +276,11 @@ pub async fn stream(
                 text: String::new(),
                 summary: preview.summary.clone(),
                 detail: result.clone(),
-                ok: approved,
+                ok,
                 tool_call_id: call.id.clone(),
                 tool_name: call.name.clone(),
                 tool_args: serde_json::to_string(&call.args).unwrap_or_default(),
+                children: Vec::new(),
             });
 
             sink(StreamEvent::ToolEnd {
@@ -245,11 +288,88 @@ pub async fn stream(
                 summary: preview.summary.clone(),
                 detail: result.clone(),
                 tool: call.name.clone(),
-                ok: approved,
+                ok,
             });
 
             messages.push(build_tool_result(provider, call, &result));
+            i += 1;
         }
+    }
+}
+
+async fn run_agent_batch(
+    provider: &Provider,
+    calls: &[ToolCall],
+    sink: &EventSink,
+    ctx: &Ctx,
+    total: &mut Acc,
+    messages: &mut Vec<ChatMessage>,
+) {
+    for call in calls {
+        total.tool_calls.push(call.clone());
+        let prompt = call.args["prompt"].as_str().unwrap_or("");
+        sink(StreamEvent::SubagentStart {
+            id: call.id.clone(),
+            title: tools::title(prompt),
+        });
+    }
+
+    let prompts: Vec<String> = calls
+        .iter()
+        .map(|call| call.args["prompt"].as_str().unwrap_or("").to_string())
+        .collect();
+
+    let futures = calls.iter().zip(prompts.iter()).map(|(call, prompt)| {
+        subagent::run(
+            provider,
+            prompt,
+            &ctx.subagent_prompt,
+            &call.id,
+            ctx.root.clone(),
+            ctx.pending.clone(),
+            ctx.cancel.clone(),
+            sink,
+        )
+    });
+    let outcomes = join_all(futures).await;
+
+    for (call, outcome) in calls.iter().zip(outcomes) {
+        let preview = tools::preview(&call.name, &call.args, ctx.root.as_deref());
+        let result = if outcome.content.trim().is_empty() {
+            if outcome.ok {
+                "（子代理无正文）".to_string()
+            } else {
+                "error: 子代理失败".to_string()
+            }
+        } else {
+            outcome.content.clone()
+        };
+
+        total.parts.push(Part {
+            kind: "tool".to_string(),
+            text: outcome.content.clone(),
+            summary: preview.summary.clone(),
+            detail: result.clone(),
+            ok: outcome.ok,
+            tool_call_id: call.id.clone(),
+            tool_name: call.name.clone(),
+            tool_args: serde_json::to_string(&call.args).unwrap_or_default(),
+            children: outcome.parts,
+        });
+
+        sink(StreamEvent::ToolEnd {
+            id: call.id.clone(),
+            summary: preview.summary,
+            detail: result.clone(),
+            tool: call.name.clone(),
+            ok: outcome.ok,
+        });
+        sink(StreamEvent::SubagentEnd {
+            id: call.id.clone(),
+            ok: outcome.ok,
+        });
+
+        messages.push(build_tool_result(provider, call, &result));
     }
 }
 
@@ -263,12 +383,41 @@ async fn run_round(
 ) -> Result<Vec<ToolCall>, String> {
     match provider.protocol.as_str() {
         "anthropic" => {
-            stream_anthropic(provider, messages, system_prompt, sink, acc, &ctx.cancel).await
+            stream_anthropic(
+                provider,
+                messages,
+                system_prompt,
+                sink,
+                acc,
+                &ctx.cancel,
+                ctx.readonly,
+            )
+            .await
         }
         "gemini" => {
-            stream_gemini(provider, messages, system_prompt, sink, acc, &ctx.cancel).await
+            stream_gemini(
+                provider,
+                messages,
+                system_prompt,
+                sink,
+                acc,
+                &ctx.cancel,
+                ctx.readonly,
+            )
+            .await
         }
-        _ => stream_openai(provider, messages, system_prompt, sink, acc, &ctx.cancel).await,
+        _ => {
+            stream_openai(
+                provider,
+                messages,
+                system_prompt,
+                sink,
+                acc,
+                &ctx.cancel,
+                ctx.readonly,
+            )
+            .await
+        }
     }
 }
 
@@ -349,6 +498,7 @@ fn emit_delta(sink: &EventSink, acc: &mut Acc, text: &str) {
             tool_call_id: String::new(),
             tool_name: String::new(),
             tool_args: String::new(),
+            children: Vec::new(),
         });
     }
     acc.content.push_str(text);
@@ -378,6 +528,7 @@ fn emit_reasoning(sink: &EventSink, acc: &mut Acc, text: &str) {
             tool_call_id: String::new(),
             tool_name: String::new(),
             tool_args: String::new(),
+            children: Vec::new(),
         });
     }
     acc.reasoning.push_str(text);
@@ -395,6 +546,7 @@ fn build_openai_body(
     provider: &Provider,
     messages: &[ChatMessage],
     system_prompt: &str,
+    readonly: bool,
 ) -> Value {
     let mut list: Vec<Value> = Vec::new();
     if !system_prompt.is_empty() {
@@ -419,7 +571,7 @@ fn build_openai_body(
         "messages": list,
         "stream": true,
         "stream_options": { "include_usage": true },
-        "tools": tools::openai_tools(),
+        "tools": tools::openai_tools(readonly),
     });
 
     let host = provider.base_url.to_lowercase();
@@ -450,8 +602,9 @@ async fn stream_openai(
     sink: &EventSink,
     acc: &mut Acc,
     cancel: &Arc<AtomicBool>,
+    readonly: bool,
 ) -> Result<Vec<ToolCall>, String> {
-    let body = build_openai_body(provider, messages, system_prompt);
+    let body = build_openai_body(provider, messages, system_prompt, readonly);
     let url = format!("{}/chat/completions", provider.base_url.trim_end_matches('/'));
     let client = reqwest::Client::new();
     let resp = client
@@ -539,18 +692,20 @@ async fn stream_openai(
                         }
                     }
                     if taps[idx].is_none() && !collected[idx].1.is_empty() {
-                        if collected[idx].0.is_empty() {
-                            collected[idx].0 = crate::store::new_id();
-                        }
-                        let id = collected[idx].0.clone();
                         let name = collected[idx].1.clone();
-                        sink(StreamEvent::ApprovalStart {
-                            id: id.clone(),
-                            tool: name.clone(),
-                            kind: tap_kind(&name).to_string(),
-                        });
-                        acc.announced.push(id);
-                        taps[idx] = Some(TapState::new(&name));
+                        if !readonly && tools::needs_approval(&name) {
+                            if collected[idx].0.is_empty() {
+                                collected[idx].0 = crate::store::new_id();
+                            }
+                            let id = collected[idx].0.clone();
+                            sink(StreamEvent::ApprovalStart {
+                                id: id.clone(),
+                                tool: name.clone(),
+                                kind: tap_kind(&name).to_string(),
+                            });
+                            acc.announced.push(id);
+                            taps[idx] = Some(TapState::new(&name));
+                        }
                     }
                     if let Some(args) = c["function"]["arguments"].as_str() {
                         collected[idx].2.push_str(args);
@@ -610,6 +765,7 @@ fn tap_kind(tool: &str) -> &'static str {
         "edit" => "edit",
         "bash" => "bash",
         "fetch" => "fetch",
+        "agent" => "agent",
         _ => "read",
     }
 }
@@ -633,6 +789,16 @@ fn tap_preview(state: &TapState, raw: &str) -> (String, String) {
         "fetch" => {
             let url = fields.get("url").map(String::as_str).unwrap_or("");
             (format!("取 {url}"), String::new())
+        }
+        "agent" => {
+            let prompt = fields.get("prompt").map(String::as_str).unwrap_or("");
+            let brief = tools::title(prompt);
+            let summary = if brief.is_empty() {
+                "子代理".to_string()
+            } else {
+                format!("子代理 · {brief}")
+            };
+            (summary, prompt.to_string())
         }
         _ => {
             let hint = if !path.is_empty() {
@@ -789,6 +955,7 @@ fn build_anthropic_body(
     provider: &Provider,
     messages: &[ChatMessage],
     system_prompt: &str,
+    readonly: bool,
 ) -> Value {
     let mut list: Vec<Value> = messages.iter().map(anthropic_message).collect();
 
@@ -814,7 +981,7 @@ fn build_anthropic_body(
         "stream": true,
     });
 
-    let mut tool_list = tools::anthropic_tools();
+    let mut tool_list = tools::anthropic_tools(readonly);
     if let Some(arr) = tool_list.as_array_mut() {
         if let Some(last) = arr.last_mut() {
             last["cache_control"] = json!({ "type": "ephemeral" });
@@ -907,8 +1074,9 @@ async fn stream_anthropic(
     sink: &EventSink,
     acc: &mut Acc,
     cancel: &Arc<AtomicBool>,
+    readonly: bool,
 ) -> Result<Vec<ToolCall>, String> {
-    let body = build_anthropic_body(provider, messages, system_prompt);
+    let body = build_anthropic_body(provider, messages, system_prompt, readonly);
     let url = format!("{}/messages", provider.base_url.trim_end_matches('/'));
     let client = reqwest::Client::new();
     let resp = client
@@ -987,9 +1155,7 @@ async fn stream_anthropic(
                             .as_str()
                             .unwrap_or("")
                             .to_string();
-                        let tap = if name.is_empty() {
-                            None
-                        } else {
+                        let tap = if !name.is_empty() && !readonly && tools::needs_approval(&name) {
                             sink(StreamEvent::ApprovalStart {
                                 id: id.clone(),
                                 tool: name.clone(),
@@ -997,6 +1163,8 @@ async fn stream_anthropic(
                             });
                             acc.announced.push(id.clone());
                             Some(TapState::new(&name))
+                        } else {
+                            None
                         };
                         current = Some((id, name, String::new(), tap));
                     }
@@ -1048,10 +1216,11 @@ fn build_gemini_body(
     messages: &[ChatMessage],
     system_prompt: &str,
     provider: &Provider,
+    readonly: bool,
 ) -> Value {
     let contents: Vec<Value> = messages.iter().map(gemini_content).collect();
 
-    let mut body = json!({ "contents": contents, "tools": tools::gemini_tools() });
+    let mut body = json!({ "contents": contents, "tools": tools::gemini_tools(readonly) });
 
     let mut gen = json!({});
     if let Some(budget) = presets::thinking_budget(&provider.thinking) {
@@ -1123,8 +1292,9 @@ async fn stream_gemini(
     sink: &EventSink,
     acc: &mut Acc,
     cancel: &Arc<AtomicBool>,
+    readonly: bool,
 ) -> Result<Vec<ToolCall>, String> {
-    let body = build_gemini_body(messages, system_prompt, provider);
+    let body = build_gemini_body(messages, system_prompt, provider, readonly);
     let url = format!(
         "{}/models/{}:streamGenerateContent?alt=sse&key={}",
         provider.base_url.trim_end_matches('/'),
