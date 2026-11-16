@@ -186,7 +186,7 @@ function buildSendPane(): HTMLElement {
   pane.appendChild(
     switchRow(
       "发送时剔除思考内容",
-      "把历史 AI 思考在发送时置空，本地记录保留",
+      "把历史 AI 思考的中间部分在发送时置空，本地记录保留",
       state.settings.strip_thinking,
       async (value) => {
         state.settings.strip_thinking = value;

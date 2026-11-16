@@ -300,6 +300,12 @@ fn build_history(
     let mut out: Vec<ChatMessage> = Vec::new();
     let mut seen: HashMap<u64, usize> = HashMap::new();
     let mut call_seq: usize = 0;
+    let assistant_total = db
+        .messages
+        .iter()
+        .filter(|m| m.session_id == session_id && m.role == "assistant")
+        .count();
+    let mut assistant_index: usize = 0;
 
     for m in db.messages.iter().filter(|m| m.session_id == session_id) {
         if m.role != "assistant" {
@@ -307,10 +313,14 @@ fn build_history(
             continue;
         }
 
-        let reasoning = if strip_thinking || m.reasoning.is_empty() {
-            None
-        } else {
+        assistant_index += 1;
+        // 只保留第一次和最近一次回复的思考，其余回复的思考在发送时置空
+        let keep_thinking =
+            !strip_thinking || assistant_index == 1 || assistant_index == assistant_total;
+        let reasoning = if keep_thinking && !m.reasoning.is_empty() {
             Some(m.reasoning.clone())
+        } else {
+            None
         };
 
         let tool_parts: Vec<&Part> = m
