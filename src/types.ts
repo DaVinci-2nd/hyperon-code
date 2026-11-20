@@ -12,6 +12,15 @@ export interface Part {
   running?: boolean;
 }
 
+export interface Attachment {
+  id: string;
+  name: string;
+  file: string;
+  mime: string;
+  size: number;
+  inline: boolean;
+}
+
 export interface Message {
   id: string;
   session_id: string;
@@ -19,6 +28,7 @@ export interface Message {
   content: string;
   reasoning: string;
   parts: Part[];
+  attachments?: Attachment[];
   created_at: number;
 }
 

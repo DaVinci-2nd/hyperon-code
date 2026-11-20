@@ -1,17 +1,33 @@
 use crate::approval::Pending;
 use crate::presets;
-use crate::store::{Part, Provider};
+use crate::store::{Attachment, Part, Provider};
 use crate::subagent;
 use crate::tools::{self, FileChangeInfo};
 use futures_util::{future::join_all, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::HashMap;
+use std::fs;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
+use tauri::AppHandle;
 
 const TAP_INTERVAL_MS: u128 = 80;
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MediaPart {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub mime: String,
+    #[serde(default)]
+    pub data: String,
+    #[serde(default)]
+    pub name: String,
+}
 
 #[derive(Clone, Serialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
@@ -85,6 +101,8 @@ pub struct ChatMessage {
     pub tool_calls: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media: Option<Vec<MediaPart>>,
 }
 
 impl ChatMessage {
@@ -95,6 +113,7 @@ impl ChatMessage {
             reasoning: None,
             tool_calls: None,
             tool_call_id: None,
+            media: None,
         }
     }
 
@@ -105,6 +124,7 @@ impl ChatMessage {
             reasoning,
             tool_calls: None,
             tool_call_id: None,
+            media: None,
         }
     }
 }
@@ -441,6 +461,7 @@ fn build_assistant_call(content: &str, calls: &[ToolCall]) -> ChatMessage {
         reasoning: None,
         tool_calls: Some(Value::Array(list)),
         tool_call_id: None,
+        media: None,
     }
 }
 
@@ -457,6 +478,7 @@ fn build_tool_result(provider: &Provider, call: &ToolCall, result: &str) -> Chat
             reasoning: None,
             tool_calls: None,
             tool_call_id: Some(call.id.clone()),
+            media: None,
         }
     } else if provider.protocol == "gemini" {
         let payload = json!([{
@@ -471,6 +493,7 @@ fn build_tool_result(provider: &Provider, call: &ToolCall, result: &str) -> Chat
             reasoning: None,
             tool_calls: None,
             tool_call_id: Some(call.id.clone()),
+            media: None,
         }
     } else {
         ChatMessage {
@@ -479,6 +502,7 @@ fn build_tool_result(provider: &Provider, call: &ToolCall, result: &str) -> Chat
             reasoning: None,
             tool_calls: None,
             tool_call_id: Some(call.id.clone()),
+            media: None,
         }
     }
 }
@@ -542,18 +566,161 @@ fn emit_reasoning(sink: &EventSink, acc: &mut Acc, text: &str) {
     });
 }
 
+fn b64_encode(data: &[u8]) -> String {
+    const CHARS: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    for chunk in data.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(CHARS[(n >> 18) as usize & 63] as char);
+        out.push(CHARS[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 {
+            CHARS[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            CHARS[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+fn media_kind(mime: &str, kinds: &[&str], protocol: &str) -> Option<&'static str> {
+    let kind = if mime.starts_with("image/") {
+        if !matches!(
+            mime,
+            "image/png" | "image/jpeg" | "image/webp" | "image/gif" | "image/heic" | "image/heif"
+        ) {
+            return None;
+        }
+        "image"
+    } else if mime.starts_with("video/") {
+        "video"
+    } else if mime.starts_with("audio/") {
+        // OpenAI 协议仅收 wav/mp3，其余模态交给原生支持方
+        if protocol != "gemini" && !mime.contains("wav") && !mime.contains("mpeg") && !mime.contains("mp3") {
+            return None;
+        }
+        "audio"
+    } else if mime == "application/pdf" {
+        "pdf"
+    } else {
+        return None;
+    };
+    if kinds.contains(&kind) {
+        Some(kind)
+    } else {
+        None
+    }
+}
+
+// 附件按能力表挑选可内联项，读盘转 base64；不可内联的附件由索引行兜底
+pub fn inline_media(
+    app: &AppHandle,
+    provider: &Provider,
+    session_id: &str,
+    attachments: &[Attachment],
+) -> Option<Vec<MediaPart>> {
+    let kinds = presets::input_kinds(&provider.protocol, &provider.model);
+    if kinds.is_empty() {
+        return None;
+    }
+    let dir = crate::store::session_dir(app, session_id);
+    let mut out: Vec<MediaPart> = Vec::new();
+    for a in attachments {
+        let Some(kind) = media_kind(&a.mime, kinds, &provider.protocol) else {
+            continue;
+        };
+        if kind == "image" && provider.image == "off" {
+            continue;
+        }
+        let Ok(bytes) = fs::read(dir.join(&a.file)) else {
+            continue;
+        };
+        out.push(MediaPart {
+            id: a.id.clone(),
+            kind: kind.to_string(),
+            mime: a.mime.clone(),
+            data: b64_encode(&bytes),
+            name: a.name.clone(),
+        });
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+fn openai_media(m: &ChatMessage, host: &str, provider: &Provider) -> Value {
+    let bare = host.contains("bigmodel");
+    let with_detail = !bare
+        && (host.contains("openai")
+            || host.contains("openrouter")
+            || host.contains("x.ai")
+            || host.contains("deepseek"));
+    let detail = presets::image_detail(&provider.image);
+    let mut parts: Vec<Value> = vec![json!({ "type": "text", "text": m.content })];
+    for p in m.media.as_deref().unwrap_or(&[]) {
+        match p.kind.as_str() {
+            "image" => {
+                let url = if bare {
+                    p.data.clone()
+                } else {
+                    format!("data:{};base64,{}", p.mime, p.data)
+                };
+                let mut image = json!({ "type": "image_url", "image_url": { "url": url } });
+                if with_detail {
+                    image["image_url"]["detail"] = json!(detail);
+                }
+                parts.push(image);
+            }
+            "audio" => {
+                let fmt = if p.mime.contains("wav") { "wav" } else { "mp3" };
+                parts.push(json!({
+                    "type": "input_audio",
+                    "input_audio": { "data": p.data, "format": fmt }
+                }));
+            }
+            "pdf" => {
+                parts.push(json!({
+                    "type": "file",
+                    "file": {
+                        "filename": p.name,
+                        "file_data": format!("data:application/pdf;base64,{}", p.data)
+                    }
+                }));
+            }
+            _ => {}
+        }
+    }
+    Value::Array(parts)
+}
+
 fn build_openai_body(
     provider: &Provider,
     messages: &[ChatMessage],
     system_prompt: &str,
     readonly: bool,
 ) -> Value {
+    let host = provider.base_url.to_lowercase();
+    let is_deepseek = host.contains("deepseek");
+    let is_glm = host.contains("bigmodel");
+
     let mut list: Vec<Value> = Vec::new();
     if !system_prompt.is_empty() {
         list.push(json!({ "role": "system", "content": system_prompt }));
     }
     for m in messages {
         let mut item = json!({ "role": m.role, "content": m.content });
+        if m.role == "user" && m.media.is_some() {
+            item["content"] = openai_media(m, &host, provider);
+        }
         if let Some(reasoning) = &m.reasoning {
             item["reasoning_content"] = json!(reasoning);
         }
@@ -573,10 +740,6 @@ fn build_openai_body(
         "stream_options": { "include_usage": true },
         "tools": tools::openai_tools(readonly),
     });
-
-    let host = provider.base_url.to_lowercase();
-    let is_deepseek = host.contains("deepseek");
-    let is_glm = host.contains("bigmodel");
 
     if presets::is_thinking_on(&provider.thinking) {
         if let Some(effort) = presets::thinking_effort(&provider.thinking) {
@@ -1012,6 +1175,27 @@ fn build_anthropic_body(
 
 fn anthropic_message(m: &ChatMessage) -> Value {
     let mut out = json!({ "role": m.role, "content": m.content });
+    if m.role == "user" && m.tool_call_id.is_none() {
+        if let Some(media) = &m.media {
+            let mut blocks: Vec<Value> = vec![json!({ "type": "text", "text": m.content })];
+            for p in media {
+                match p.kind.as_str() {
+                    "image" => blocks.push(json!({
+                        "type": "image",
+                        "source": { "type": "base64", "media_type": p.mime, "data": p.data }
+                    })),
+                    "pdf" => blocks.push(json!({
+                        "type": "document",
+                        "source": { "type": "base64", "media_type": "application/pdf", "data": p.data },
+                        "title": p.name
+                    })),
+                    _ => {}
+                }
+            }
+            out["content"] = Value::Array(blocks);
+            return out;
+        }
+    }
     if let Some(calls) = &m.tool_calls {
         if let Some(list) = calls.as_array() {
             let mut blocks: Vec<Value> = Vec::new();
@@ -1241,6 +1425,17 @@ fn build_gemini_body(
 
 fn gemini_content(m: &ChatMessage) -> Value {
     let role = if m.role == "assistant" { "model" } else { "user" };
+    if m.role == "user" && m.tool_call_id.is_none() {
+        if let Some(media) = &m.media {
+            let mut parts: Vec<Value> = vec![json!({ "text": m.content })];
+            for p in media {
+                parts.push(json!({
+                    "inline_data": { "mime_type": p.mime, "data": p.data }
+                }));
+            }
+            return json!({ "role": role, "parts": parts });
+        }
+    }
     if let Some(calls) = &m.tool_calls {
         if let Some(list) = calls.as_array() {
             let mut parts: Vec<Value> = Vec::new();

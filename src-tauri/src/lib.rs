@@ -12,7 +12,7 @@ use presets::Preset;
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use store::{Database, Message, Part, Project, Provider, Session, Settings, BUILTIN_PROJECT_ID};
+use store::{Attachment, Database, Message, Part, Project, Provider, Session, Settings, BUILTIN_PROJECT_ID};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, State};
 
@@ -223,6 +223,8 @@ fn delete_session(app: AppHandle, id: String) {
     let mut db = store::load(&app);
     db.sessions.retain(|s| s.id != id);
     db.messages.retain(|m| m.session_id != id);
+    // 会话附件目录与会话共存亡
+    let _ = std::fs::remove_dir_all(store::session_dir(&app, &id));
     store::save(&app, &db);
 }
 
@@ -287,7 +289,23 @@ fn estimate_tokens(text: &str) -> u64 {
     (cjk * 0.6 + other * 0.3).round() as u64
 }
 
+// 附件以索引行告知路径与大小，让模型用 read 工具自取；多模态内联仅挂最新一条消息
+fn index_lines(app: &AppHandle, session_id: &str, attachments: &[Attachment]) -> String {
+    let dir = store::session_dir(app, session_id);
+    let mut out = String::new();
+    for a in attachments {
+        out.push_str(&format!(
+            "[附件] {} · {} · {}\n",
+            a.name,
+            store::fmt_size(a.size),
+            dir.join(&a.file).display()
+        ));
+    }
+    out
+}
+
 fn build_history(
+    app: &AppHandle,
     db: &Database,
     session_id: &str,
     protocol: &str,
@@ -310,7 +328,14 @@ fn build_history(
 
     for m in db.messages.iter().filter(|m| m.session_id == session_id) {
         if m.role != "assistant" {
-            out.push(ChatMessage::text(&m.role, &m.content));
+            let mut content = m.content.clone();
+            if !m.attachments.is_empty() {
+                if !content.is_empty() {
+                    content.push('\n');
+                }
+                content.push_str(index_lines(app, session_id, &m.attachments).trim_end());
+            }
+            out.push(ChatMessage::text(&m.role, &content));
             continue;
         }
 
@@ -384,6 +409,7 @@ fn build_history(
             reasoning,
             tool_calls: Some(serde_json::Value::Array(calls)),
             tool_call_id: None,
+            media: None,
         });
 
         let first_id = results.first().map(|r| r.0.clone()).unwrap_or_default();
@@ -404,6 +430,7 @@ fn build_history(
                 reasoning: None,
                 tool_calls: None,
                 tool_call_id: Some(first_id),
+                media: None,
             });
         } else if protocol == "gemini" {
             let parts: Vec<serde_json::Value> = results
@@ -423,6 +450,7 @@ fn build_history(
                 reasoning: None,
                 tool_calls: None,
                 tool_call_id: Some(first_id),
+                media: None,
             });
         } else {
             for (id, _, detail) in results {
@@ -432,12 +460,79 @@ fn build_history(
                     reasoning: None,
                     tool_calls: None,
                     tool_call_id: Some(id),
+                    media: None,
                 });
             }
         }
     }
 
     out
+}
+
+fn percent_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let Ok(v) = u8::from_str_radix(&text[i + 1..i + 3], 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).to_string()
+}
+
+#[tauri::command]
+fn save_upload(app: AppHandle, request: tauri::ipc::Request) -> Result<Attachment, String> {
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("上传内容为空".to_string());
+    };
+    let headers = request.headers();
+    let session_id = percent_decode(
+        headers
+            .get("x-session-id")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or(""),
+    );
+    let name = percent_decode(
+        headers
+            .get("x-file-name")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or(""),
+    );
+    let mime = percent_decode(
+        headers
+            .get("x-mime")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or(""),
+    );
+    if name.is_empty() {
+        return Err("文件名为空".to_string());
+    }
+    let db = store::load(&app);
+    if !db.sessions.iter().any(|s| s.id == session_id) {
+        return Err("会话不存在".to_string());
+    }
+    store::save_attachment(&app, &session_id, &name, &mime, bytes)
+}
+
+#[tauri::command]
+fn read_attachment(
+    app: AppHandle,
+    session_id: String,
+    file: String,
+) -> Result<tauri::ipc::Response, String> {
+    if file.contains("..") {
+        return Err("非法路径".to_string());
+    }
+    let path = store::session_dir(&app, &session_id).join(&file);
+    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 #[tauri::command]
@@ -466,6 +561,7 @@ fn estimate_context(
     total += estimate_tokens(&tools_json.to_string());
 
     let history = build_history(
+        &app,
         &db,
         &session_id,
         &protocol,
@@ -505,12 +601,14 @@ async fn send_message(
     session_id: String,
     provider_id: String,
     content: String,
+    attachments: Vec<Attachment>,
     channel: Channel<chat::StreamEvent>,
 ) -> Result<String, String> {
     state.cancel.store(false, Ordering::Relaxed);
 
     let assistant_id = store::new_id();
-    let (provider, mut history, root, system_prompt, subagent_prompt) = {
+    let user_id = store::new_id();
+    let (provider, mut history, root, system_prompt, subagent_prompt, inline_ids) = {
         let mut db = store::load(&app);
         if !db.sessions.iter().any(|s| s.id == session_id) {
             return Err("会话不存在".to_string());
@@ -522,12 +620,13 @@ async fn send_message(
             .cloned()
             .ok_or_else(|| "模型未配置".to_string())?;
         db.messages.push(Message {
-            id: store::new_id(),
+            id: user_id.clone(),
             session_id: session_id.clone(),
             role: "user".to_string(),
             content: content.clone(),
             reasoning: String::new(),
             parts: Vec::new(),
+            attachments: attachments.clone(),
             created_at: store::now_ms(),
         });
         if let Some(s) = db.sessions.iter_mut().find(|s| s.id == session_id) {
@@ -535,13 +634,27 @@ async fn send_message(
                 s.title = content.chars().take(20).collect();
             }
         }
-        let history = build_history(
+        let mut history = build_history(
+            &app,
             &db,
             &session_id,
             &provider.protocol,
             db.settings.strip_thinking,
             db.settings.strip_duplicate_tool_results,
         );
+        // 仅最新一条用户消息内联多模态，历史附件只留索引行
+        let mut inline_ids: Vec<String> = Vec::new();
+        if !attachments.is_empty() {
+            if let Some(last) = history.last_mut() {
+                if last.role == "user" {
+                    let media = chat::inline_media(&app, &provider, &session_id, &attachments);
+                    if let Some(parts) = &media {
+                        inline_ids = parts.iter().map(|p| p.id.clone()).collect();
+                    }
+                    last.media = media;
+                }
+            }
+        }
         let root = db
             .sessions
             .iter()
@@ -555,6 +668,7 @@ async fn send_message(
             content: String::new(),
             reasoning: String::new(),
             parts: Vec::new(),
+            attachments: Vec::new(),
             created_at: store::now_ms(),
         });
         store::save(&app, &db);
@@ -564,6 +678,7 @@ async fn send_message(
             root,
             db.settings.system_prompt.clone(),
             db.settings.subagent_prompt.clone(),
+            inline_ids,
         )
     };
 
@@ -609,6 +724,15 @@ async fn send_message(
                 m.content = acc.content.clone();
                 m.reasoning = acc.reasoning.clone();
                 m.parts = acc.parts.clone();
+            }
+            if !inline_ids.is_empty() {
+                if let Some(m) = db3.messages.iter_mut().find(|m| m.id == user_id) {
+                    for a in m.attachments.iter_mut() {
+                        if inline_ids.contains(&a.id) {
+                            a.inline = true;
+                        }
+                    }
+                }
             }
             let created = store::now_ms();
             for change in &acc.changes {
@@ -666,6 +790,8 @@ pub fn run() {
             delete_session,
             get_messages,
             get_messages_sync,
+            save_upload,
+            read_attachment,
             rollback_preview,
             rollback_apply,
             estimate_context,

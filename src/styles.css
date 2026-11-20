@@ -782,6 +782,104 @@ select {
   filter: brightness(1.08);
 }
 
+.attach-input {
+  display: none;
+}
+
+.attach-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 6px 10px 0;
+}
+
+.attach-chips:empty {
+  display: none;
+}
+
+.attach-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  font-size: 12px;
+}
+
+.attach-chip.is-warn {
+  border-color: #c9a227;
+}
+
+.attach-chip-thumb {
+  width: 22px;
+  height: 22px;
+  object-fit: cover;
+  border-radius: 4px;
+}
+
+.attach-chip-icon {
+  flex: 0 0 auto;
+  color: var(--muted);
+}
+
+.attach-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attach-chip-size {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.attach-chip-del {
+  flex: 0 0 auto;
+  padding: 0 2px;
+  color: var(--muted);
+}
+
+.attach-chip-del:hover {
+  color: var(--text);
+}
+
+.attach-warn {
+  padding: 4px 12px 0;
+  color: #c9a227;
+  font-size: 12px;
+}
+
+.attach-warn[hidden] {
+  display: none;
+}
+
+.attach-thumb {
+  display: block;
+  max-width: 320px;
+  max-height: 240px;
+  margin-top: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.attach-file {
+  display: inline-block;
+  margin-top: 6px;
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.attach-file.is-inline {
+  border-color: var(--accent);
+}
+
 .usage-tag {
   margin-right: 10px;
   font-size: 11px;

@@ -50,6 +50,64 @@ pub fn context_window(model: &str) -> u64 {
     200_000
 }
 
+pub struct ModelInput {
+    pub id: &'static str,
+    pub kinds: &'static [&'static str],
+}
+
+// 模型可内联的输入模态：image/audio/video/pdf；未匹配的模型一律按纯文本处理
+pub const MODEL_INPUTS: &[ModelInput] = &[
+    ModelInput {
+        id: "gpt-",
+        kinds: &["image", "audio"],
+    },
+    ModelInput {
+        id: "claude-",
+        kinds: &["image", "pdf"],
+    },
+    ModelInput {
+        id: "gemini-",
+        kinds: &["image", "pdf", "audio", "video"],
+    },
+    ModelInput {
+        id: "deepseek-flash",
+        kinds: &["image", "pdf"],
+    },
+    ModelInput {
+        id: "-vl",
+        kinds: &["image"],
+    },
+    ModelInput {
+        id: "kimi-k3",
+        kinds: &["image"],
+    },
+    ModelInput {
+        id: "grok-",
+        kinds: &["image"],
+    },
+];
+
+pub fn input_kinds(protocol: &str, model: &str) -> &'static [&'static str] {
+    if protocol == "anthropic" {
+        return &["image", "pdf"];
+    }
+    if protocol == "gemini" {
+        return &["image", "pdf", "audio", "video"];
+    }
+    let lower = model.to_lowercase();
+    let lower = lower.rsplit('/').next().unwrap_or("");
+    // GLM 视觉系列以 v 结尾，文本系列（glm-4.5/5.3 等）不带
+    if lower.starts_with("glm-") && lower.ends_with('v') {
+        return &["image"];
+    }
+    for m in MODEL_INPUTS {
+        if lower.contains(m.id) {
+            return m.kinds;
+        }
+    }
+    &[]
+}
+
 pub const PRESETS: &[Preset] = &[
     Preset {
         id: "openai",

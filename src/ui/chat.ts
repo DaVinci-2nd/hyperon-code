@@ -1,10 +1,35 @@
+import * as api from "../api";
 import { renderMarkdown, renderMarkdownTail } from "../markdown";
 import { state } from "../state";
-import type { Part } from "../types";
+import type { Attachment, Part } from "../types";
+import { fmtSize } from "./attach";
 import { el } from "./dom";
 import { openRollback } from "./rollback";
 
 const INITIAL_LIMIT = 30;
+
+// 历史消息里的附件从会话文件夹读回字节渲染，未内联的文件显示为一行 chip
+function attachmentNode(a: Attachment): HTMLElement {
+  if (a.mime.startsWith("image/")) {
+    const img = el("img", "attach-thumb");
+    img.alt = a.name;
+    const sid = state.currentSessionId;
+    if (sid) {
+      void api.readAttachment(sid, a.file).then((buf) => {
+        const url = URL.createObjectURL(new Blob([buf], { type: a.mime }));
+        img.src = url;
+        img.onload = () => URL.revokeObjectURL(url);
+      });
+    }
+    return img;
+  }
+  const chip = el("div", "attach-file", `${a.name} · ${fmtSize(a.size)}`);
+  if (a.inline) {
+    chip.classList.add("is-inline");
+    chip.title = "已内联发送给模型";
+  }
+  return chip;
+}
 
 function foldBlock(
   label: string,
@@ -172,6 +197,7 @@ interface MessageLike {
   content: string;
   reasoning?: string;
   parts?: Part[];
+  attachments?: Attachment[];
 }
 
 function rerenderMessages(): void {
@@ -208,6 +234,9 @@ function messageRow(role: string, message?: MessageLike): HTMLElement {
     const body = el("div", "msg-body");
     body.innerHTML = renderMarkdown(message?.content ?? "");
     holder.appendChild(body);
+    (message?.attachments ?? []).forEach((a) => {
+      holder.appendChild(attachmentNode(a));
+    });
   } else {
     const parts = message?.parts ?? [];
     if (parts.length === 0) {

@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager};
 
 pub const BUILTIN_PROJECT_ID: &str = "builtin";
@@ -136,6 +136,22 @@ pub struct Part {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Attachment {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub file: String,
+    #[serde(default)]
+    pub mime: String,
+    #[serde(default)]
+    pub size: u64,
+    #[serde(default)]
+    pub inline: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileChange {
     #[serde(default)]
     pub id: String,
@@ -171,6 +187,8 @@ pub struct Message {
     pub reasoning: String,
     #[serde(default)]
     pub parts: Vec<Part>,
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
     #[serde(default)]
     pub created_at: i64,
 }
@@ -216,6 +234,66 @@ pub fn data_file(app: &AppHandle) -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from("."));
     let _ = fs::create_dir_all(&dir);
     dir.join("data.json")
+}
+
+// 会话附件目录：与 data.json 同级，独立于项目文件夹
+pub fn session_dir(app: &AppHandle, session_id: &str) -> PathBuf {
+    let dir = app
+        .path()
+        .app_data_dir()
+        .unwrap_or_else(|_| PathBuf::from("."));
+    dir.join("uploads").join(session_id)
+}
+
+fn unique_name(dir: &PathBuf, name: &str) -> String {
+    if !dir.join(name).exists() {
+        return name.to_string();
+    }
+    let path = Path::new(name);
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or(name);
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+    for i in 2.. {
+        let candidate = if ext.is_empty() {
+            format!("{stem}-{i}")
+        } else {
+            format!("{stem}-{i}.{ext}")
+        };
+        if !dir.join(&candidate).exists() {
+            return candidate;
+        }
+    }
+    format!("{stem}-x")
+}
+
+pub fn save_attachment(
+    app: &AppHandle,
+    session_id: &str,
+    name: &str,
+    mime: &str,
+    bytes: &[u8],
+) -> Result<Attachment, String> {
+    let dir = session_dir(app, session_id);
+    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let file = unique_name(&dir, name);
+    fs::write(dir.join(&file), bytes).map_err(|e| e.to_string())?;
+    Ok(Attachment {
+        id: new_id(),
+        name: name.to_string(),
+        file,
+        mime: mime.to_string(),
+        size: bytes.len() as u64,
+        inline: false,
+    })
+}
+
+pub fn fmt_size(bytes: u64) -> String {
+    if bytes >= 1024 * 1024 {
+        format!("{:.1}MB", bytes as f64 / (1024.0 * 1024.0))
+    } else if bytes >= 1024 {
+        format!("{:.1}KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes}B")
+    }
 }
 
 fn backup_corrupt(path: &PathBuf) {

@@ -1,5 +1,6 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
 import type {
+  Attachment,
   Message,
   Preset,
   Project,
@@ -101,10 +102,30 @@ export function estimateContext(
   });
 }
 
+export function saveUpload(
+  sessionId: string,
+  name: string,
+  mime: string,
+  data: Uint8Array
+): Promise<Attachment> {
+  return invoke<Attachment>("save_upload", data, {
+    headers: {
+      "x-session-id": sessionId,
+      "x-file-name": encodeURIComponent(name),
+      "x-mime": encodeURIComponent(mime),
+    },
+  });
+}
+
+export function readAttachment(sessionId: string, file: string): Promise<ArrayBuffer> {
+  return invoke<ArrayBuffer>("read_attachment", { sessionId, file });
+}
+
 export function sendMessage(
   sessionId: string,
   providerId: string,
   content: string,
+  attachments: Attachment[],
   onEvent: (event: StreamEvent) => void
 ): Promise<string> {
   const channel = new Channel<StreamEvent>();
@@ -113,6 +134,7 @@ export function sendMessage(
     sessionId,
     providerId,
     content,
+    attachments,
     channel,
   });
 }

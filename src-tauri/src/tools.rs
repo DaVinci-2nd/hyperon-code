@@ -333,7 +333,20 @@ fn run(name: &str, args: &Value, root: Option<&str>) -> Result<String, String> {
         "read" => {
             let path = args["path"].as_str().ok_or("缺 path")?;
             let abs = resolve(root, path);
-            let text = fs::read_to_string(&abs).map_err(|e| e.to_string())?;
+            let text = match fs::read_to_string(&abs) {
+                Ok(t) => t,
+                Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
+                    // 二进制文件给一行提示，避免模型对着乱码反复重试
+                    let size = fs::metadata(&abs).map(|m| m.len()).unwrap_or(0);
+                    let ext = abs.extension().and_then(|s| s.to_str()).unwrap_or("");
+                    return Err(format!(
+                        "二进制文件 {} · {} · 无法直接读取",
+                        ext,
+                        crate::store::fmt_size(size)
+                    ));
+                }
+                Err(e) => return Err(e.to_string()),
+            };
             let has_offset = args["offset"].is_number();
             let has_limit = args["limit"].is_number();
             if !has_offset && !has_limit {

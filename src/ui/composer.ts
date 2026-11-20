@@ -1,6 +1,7 @@
 import * as api from "../api";
 import { state, rememberComposer } from "../state";
-import type { Part } from "../types";
+import type { Attachment, Part } from "../types";
+import { buildChip, uploadFile, warnText } from "./attach";
 import {
   beginApproval,
   closeApproval,
@@ -93,11 +94,55 @@ export function buildComposer(onDone: () => void): HTMLElement {
   input.rows = 2;
   box.appendChild(input);
 
+  const chips = el("div", "attach-chips");
+  box.appendChild(chips);
+
+  const warn = el("div", "attach-warn");
+  warn.hidden = true;
+  box.appendChild(warn);
+
+  const fileInput = el("input", "attach-input");
+  fileInput.type = "file";
+  fileInput.multiple = true;
+  box.appendChild(fileInput);
+
   const bar = el("div", "composer-bar");
 
   const attach = el("button", "composer-btn", "＋");
   attach.title = "添加附件";
   bar.appendChild(attach);
+
+  const pending: Attachment[] = [];
+
+  const removeAttachment = (id: string): void => {
+    const idx = pending.findIndex((a) => a.id === id);
+    if (idx >= 0) pending.splice(idx, 1);
+    paintChips();
+  };
+
+  const paintChips = (): void => {
+    chips.replaceChildren();
+    pending.forEach((a) => chips.appendChild(buildChip(a, removeAttachment)));
+    const text = warnText(pending);
+    warn.textContent = text;
+    warn.hidden = text.length === 0;
+    setSendIdle();
+  };
+
+  const addFiles = async (files: FileList | null): Promise<void> => {
+    if (!files || files.length === 0 || !state.currentSessionId) return;
+    const sessionId = state.currentSessionId;
+    for (const file of Array.from(files)) {
+      try {
+        pending.push(await uploadFile(sessionId, file));
+      } catch (err) {
+        warn.textContent = `上传失败：${String(err)}`;
+        warn.hidden = false;
+        continue;
+      }
+      paintChips();
+    }
+  };
 
   const model = el("select", "composer-select");
   if (state.providers.length === 0) {
@@ -145,7 +190,7 @@ export function buildComposer(onDone: () => void): HTMLElement {
 
   const setSendIdle = (): void => {
     send.innerHTML = SEND_ICON;
-    send.disabled = input.value.trim().length === 0;
+    send.disabled = input.value.trim().length === 0 && pending.length === 0;
     send.title = "发送";
   };
 
@@ -180,8 +225,10 @@ export function buildComposer(onDone: () => void): HTMLElement {
   void refresh();
 
   const doSend = async (): Promise<void> => {
+    if (state.streaming) return;
     const text = input.value.trim();
-    if (!text || state.streaming) return;
+    const attachments = pending.splice(0, pending.length);
+    if (!text && attachments.length === 0) return;
     if (!state.currentSessionId) return;
     if (!state.currentProviderId) return;
 
@@ -191,6 +238,7 @@ export function buildComposer(onDone: () => void): HTMLElement {
     input.value = "";
     state.streaming = true;
     setSendBusy();
+    paintChips();
 
     state.messages = await api.getMessages(sessionId);
     state.messages.push({
@@ -200,6 +248,7 @@ export function buildComposer(onDone: () => void): HTMLElement {
       content: text,
       reasoning: "",
       parts: [],
+      attachments,
       created_at: Date.now(),
     });
     onDone();
@@ -253,7 +302,7 @@ export function buildComposer(onDone: () => void): HTMLElement {
     };
 
     try {
-      await api.sendMessage(sessionId, providerId, text, (event) => {
+      await api.sendMessage(sessionId, providerId, text, attachments, (event) => {
         if (event.type === "reasoning") {
           if (!current || current.kind !== "think") pushPart("think");
           current!.text += event.text;
@@ -393,15 +442,33 @@ export function buildComposer(onDone: () => void): HTMLElement {
     }
     void doSend();
   });
+  attach.addEventListener("click", () => fileInput.click());
+  fileInput.addEventListener("change", () => {
+    void addFiles(fileInput.files);
+    fileInput.value = "";
+  });
+  box.addEventListener("dragover", (e) => e.preventDefault());
+  box.addEventListener("drop", (e) => {
+    e.preventDefault();
+    const files = e.dataTransfer?.files;
+    if (files && files.length > 0) void addFiles(files);
+  });
   input.addEventListener("input", () => {
     if (!state.streaming) {
-      send.disabled = input.value.trim().length === 0;
+      send.disabled = input.value.trim().length === 0 && pending.length === 0;
     }
   });
   input.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && e.ctrlKey) {
       e.preventDefault();
       void doSend();
+    }
+  });
+  input.addEventListener("paste", (e) => {
+    const files = e.clipboardData?.files;
+    if (files && files.length > 0) {
+      e.preventDefault();
+      void addFiles(files);
     }
   });
 
