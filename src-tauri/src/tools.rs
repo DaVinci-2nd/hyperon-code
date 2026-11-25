@@ -1,7 +1,12 @@
 use serde_json::{json, Value};
 use std::fs;
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::sync::Arc;
+use std::thread;
+use std::time::Duration;
 
 pub struct ToolSpec {
     pub name: &'static str,
@@ -434,6 +439,11 @@ fn run(name: &str, args: &Value, root: Option<&str>) -> Result<String, String> {
             if !cwd.is_empty() {
                 cmd.current_dir(&cwd);
             }
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                cmd.creation_flags(0x08000000);
+            }
             let output = cmd.output().map_err(|e| e.to_string())?;
             let stdout = String::from_utf8_lossy(&output.stdout).to_string();
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -453,6 +463,113 @@ fn run(name: &str, args: &Value, root: Option<&str>) -> Result<String, String> {
             ureq_get(url)
         }
         _ => Err(format!("未知工具 {name}")),
+    }
+}
+
+pub fn execute_bash_streaming(
+    args: &Value,
+    root: Option<&str>,
+    on_output: Arc<dyn Fn(String) + Send + Sync>,
+) -> String {
+    let command = match args["command"].as_str() {
+        Some(value) => value.to_string(),
+        None => return "error: 缺 command".to_string(),
+    };
+    let cwd = args["cwd"]
+        .as_str()
+        .map(|s| s.to_string())
+        .or_else(|| root.map(|s| s.to_string()))
+        .unwrap_or_default();
+
+    let mut cmd = Command::new("powershell");
+    cmd.arg("-NoProfile").arg("-Command").arg(&command);
+    if !cwd.is_empty() {
+        cmd.current_dir(&cwd);
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let mut child = match cmd.spawn() {
+        Ok(value) => value,
+        Err(error) => return format!("error: {error}"),
+    };
+
+    let (tx, rx) = mpsc::channel::<(bool, String)>();
+    let mut readers = Vec::new();
+    if let Some(stdout) = child.stdout.take() {
+        let tx = tx.clone();
+        readers.push(thread::spawn(move || read_stream(stdout, false, tx)));
+    }
+    if let Some(stderr) = child.stderr.take() {
+        let tx = tx.clone();
+        readers.push(thread::spawn(move || read_stream(stderr, true, tx)));
+    }
+    drop(tx);
+
+    let mut stdout_all = String::new();
+    let mut stderr_all = String::new();
+    let mut pending = String::new();
+    loop {
+        match rx.recv_timeout(Duration::from_millis(30)) {
+            Ok((is_stderr, chunk)) => {
+                if is_stderr {
+                    stderr_all.push_str(&chunk);
+                } else {
+                    stdout_all.push_str(&chunk);
+                }
+                pending.push_str(&chunk);
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if !pending.is_empty() {
+                    on_output(std::mem::take(&mut pending));
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    if !pending.is_empty() {
+        on_output(pending);
+    }
+    for reader in readers {
+        let _ = reader.join();
+    }
+    let _ = child.wait();
+
+    let mut text = format!("> {command}\n");
+    if !cwd.is_empty() {
+        text.push_str(&format!("cwd: {cwd}\n"));
+    }
+    text.push_str("---output---\n");
+    text.push_str(&stdout_all);
+    if !stderr_all.is_empty() {
+        text.push_str(&stderr_all);
+    }
+    text
+}
+
+fn read_stream<R: std::io::Read>(
+    stream: R,
+    is_stderr: bool,
+    tx: mpsc::Sender<(bool, String)>,
+) {
+    let mut reader = BufReader::new(stream);
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) => break,
+            Ok(_) => {
+                let text = String::from_utf8_lossy(&buf).to_string();
+                if tx.send((is_stderr, text)).is_err() {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
     }
 }
 

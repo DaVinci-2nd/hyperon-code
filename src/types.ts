@@ -30,6 +30,15 @@ export interface Message {
   parts: Part[];
   attachments?: Attachment[];
   created_at: number;
+  model: string;
+  elapsed_ms: number;
+  output_ms: number;
+  output_tokens: number;
+}
+
+export interface SendResult {
+  user: Message;
+  assistant: Message;
 }
 
 export interface Session {
@@ -102,6 +111,13 @@ export type StreamEvent =
       detail: string;
       kind: string;
     }
+  | {
+      type: "toolstart";
+      id: string;
+      tool: string;
+      summary: string;
+    }
+  | { type: "tooldelta"; id: string; text: string }
   | {
       type: "toolend";
       id: string;

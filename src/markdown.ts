@@ -33,7 +33,7 @@ hljs.registerLanguage("yml", yaml);
 hljs.registerLanguage("markdown", markdown);
 hljs.registerLanguage("md", markdown);
 
-function escapeHtml(value: string): string {
+export function escapeHtml(value: string): string {
   return value
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
@@ -45,34 +45,47 @@ const md: MarkdownIt = new MarkdownIt({
   html: false,
   linkify: true,
   breaks: true,
-  highlight(code: string, lang: string): string {
-    const language = lang && hljs.getLanguage(lang) ? lang : "";
-    const body = language
-      ? hljs.highlight(code, { language, ignoreIllegals: true }).value
-      : escapeHtml(code);
-    const label = language || "text";
-    return (
-      `<div class="code-block">` +
-      `<div class="code-lang">${escapeHtml(label)}</div>` +
-      `<pre class="code-pre"><code class="hljs">${body}</code></pre>` +
-      `</div>`
-    );
-  },
 });
+
+md.renderer.rules.fence = (tokens, idx) => {
+  const token = tokens[idx];
+  const lang = token.info ? token.info.trim() : "";
+  const language = lang && hljs.getLanguage(lang) ? lang : "";
+  const body = language
+    ? hljs.highlight(token.content, { language, ignoreIllegals: true }).value
+    : escapeHtml(token.content);
+  const label = language || "text";
+  return (
+    `<div class="code-block">` +
+    `<div class="code-head">` +
+    `<span class="code-lang">${escapeHtml(label)}</span>` +
+    `<button class="code-copy" type="button">复制</button>` +
+    `</div>` +
+    `<pre class="code-pre"><code class="hljs">${body}</code></pre>` +
+    `</div>`
+  );
+};
 
 const cache = new Map<string, string>();
 const CACHE_LIMIT = 400;
+const CACHE_MAX_CHARS = 200_000;
 
 export function renderMarkdown(source: string): string {
   const hit = cache.get(source);
   if (hit !== undefined) return hit;
   const html = md.render(source);
-  if (cache.size >= CACHE_LIMIT) {
-    const first = cache.keys().next().value;
-    if (first !== undefined) cache.delete(first);
+  if (source.length <= CACHE_MAX_CHARS) {
+    if (cache.size >= CACHE_LIMIT) {
+      const first = cache.keys().next().value;
+      if (first !== undefined) cache.delete(first);
+    }
+    cache.set(source, html);
   }
-  cache.set(source, html);
   return html;
+}
+
+export function renderFresh(source: string): string {
+  return md.render(source);
 }
 
 export interface TailState {
@@ -104,7 +117,7 @@ export function renderMarkdownTail(source: string): string {
   const tailHtml = md.render(tail);
   const html = headHtml + tailHtml;
 
-  if (head.length > 0) {
+  if (head.length > 0 && head.length <= CACHE_MAX_CHARS) {
     const prev = cache.get(head);
     if (prev === undefined) {
       if (cache.size >= CACHE_LIMIT) {

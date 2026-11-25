@@ -14,6 +14,7 @@ use std::time::Instant;
 use tauri::AppHandle;
 
 const TAP_INTERVAL_MS: u128 = 80;
+const DELTA_INTERVAL_MS: u128 = 24;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct MediaPart {
@@ -52,6 +53,15 @@ pub enum StreamEvent {
         summary: String,
         detail: String,
         kind: String,
+    },
+    ToolStart {
+        id: String,
+        tool: String,
+        summary: String,
+    },
+    ToolDelta {
+        id: String,
+        text: String,
     },
     ToolEnd {
         id: String,
@@ -138,9 +148,19 @@ pub struct Acc {
     pub tool_calls: Vec<ToolCall>,
     pub changes: Vec<FileChangeInfo>,
     pub truncated: bool,
+    pub elapsed_ms: u64,
+    pub output_ms: u64,
+    pub output_tokens: u64,
     announced: Vec<String>,
     reasoning_open: bool,
     text_open: bool,
+    started: Instant,
+    text_started: Option<Instant>,
+    text_last: Option<Instant>,
+    pending_delta: String,
+    delta_last: Instant,
+    pending_reasoning: String,
+    reasoning_last: Instant,
 }
 
 impl Acc {
@@ -152,9 +172,19 @@ impl Acc {
             tool_calls: Vec::new(),
             changes: Vec::new(),
             truncated: false,
+            elapsed_ms: 0,
+            output_ms: 0,
+            output_tokens: 0,
             announced: Vec::new(),
             reasoning_open: false,
             text_open: false,
+            started: Instant::now(),
+            text_started: None,
+            text_last: None,
+            pending_delta: String::new(),
+            delta_last: Instant::now(),
+            pending_reasoning: String::new(),
+            reasoning_last: Instant::now(),
         }
     }
 
@@ -166,6 +196,12 @@ impl Acc {
     }
 
     fn close_text(&mut self) {
+        if let (Some(start), Some(last)) = (self.text_started, self.text_last) {
+            let span = last.duration_since(start).as_millis() as u64;
+            self.output_ms += span.max(1);
+        }
+        self.text_started = None;
+        self.text_last = None;
         self.text_open = false;
     }
 }
@@ -195,6 +231,7 @@ pub async fn stream(
     let mut total = Acc::new();
 
     loop {
+        total.elapsed_ms = total.started.elapsed().as_millis() as u64;
         if ctx.cancel.load(Ordering::Relaxed) {
             sink(StreamEvent::Done);
             return Ok(total);
@@ -203,19 +240,38 @@ pub async fn stream(
         let mut round = Acc::new();
         let outcome = run_round(provider, messages, system_prompt, &sink, &mut round, ctx).await;
 
+        flush_reasoning(&sink, &mut round);
         round.close_reasoning(&sink);
+        round.close_text();
+        flush_delta(&sink, &mut round);
         total.content.push_str(&round.content);
         total.reasoning.push_str(&round.reasoning);
         total.parts.extend(round.parts);
         total.changes.extend(round.changes);
+        total.output_ms += round.output_ms;
+        total.output_tokens += round.output_tokens;
+        total.elapsed_ms = total.started.elapsed().as_millis() as u64;
 
         let calls = match outcome {
             Ok(calls) => calls,
             Err(err) => {
                 total.truncated = true;
-                sink(StreamEvent::Error {
-                    message: err.clone(),
+                if !total.content.is_empty() {
+                    total.content.push_str("\n\n");
+                }
+                total.content.push_str(&format!("请求失败：{err}"));
+                total.parts.push(Part {
+                    kind: "text".to_string(),
+                    text: format!("请求失败：{err}"),
+                    summary: String::new(),
+                    detail: String::new(),
+                    ok: true,
+                    tool_call_id: String::new(),
+                    tool_name: String::new(),
+                    tool_args: String::new(),
+                    children: Vec::new(),
                 });
+                sink(StreamEvent::Error { message: err });
                 return Ok(total);
             }
         };
@@ -280,10 +336,41 @@ pub async fn stream(
             let (result, ok) = if blocked {
                 ("error: 只读环境".to_string(), false)
             } else if approved {
-                let (text, change) =
-                    tools::execute_tracked(&call.name, &call.args, ctx.root.as_deref());
-                produced = change;
-                (text, true)
+                sink(StreamEvent::ToolStart {
+                    id: call.id.clone(),
+                    tool: call.name.clone(),
+                    summary: preview.summary.clone(),
+                });
+                if call.name == "bash" {
+                    let args = call.args.clone();
+                    let root = ctx.root.clone();
+                    let sink2 = sink.clone();
+                    let id = call.id.clone();
+                    let text = tokio::task::spawn_blocking(move || {
+                        let on_output: Arc<dyn Fn(String) + Send + Sync> =
+                            Arc::new(move |chunk| {
+                                sink2(StreamEvent::ToolDelta {
+                                    id: id.clone(),
+                                    text: chunk,
+                                });
+                            });
+                        tools::execute_bash_streaming(&args, root.as_deref(), on_output)
+                    })
+                    .await
+                    .unwrap_or_else(|error| format!("error: {error}"));
+                    (text, true)
+                } else {
+                    let args = call.args.clone();
+                    let root = ctx.root.clone();
+                    let name = call.name.clone();
+                    let output = tokio::task::spawn_blocking(move || {
+                        tools::execute_tracked(&name, &args, root.as_deref())
+                    })
+                    .await
+                    .unwrap_or_else(|error| (format!("error: {error}"), None));
+                    produced = output.1;
+                    (output.0, true)
+                }
             } else {
                 ("user denied".to_string(), false)
             };
@@ -513,6 +600,7 @@ fn emit_delta(sink: &EventSink, acc: &mut Acc, text: &str) {
     }
     if !acc.text_open {
         acc.text_open = true;
+        acc.text_started = Some(Instant::now());
         acc.parts.push(Part {
             kind: "text".to_string(),
             text: String::new(),
@@ -525,24 +613,38 @@ fn emit_delta(sink: &EventSink, acc: &mut Acc, text: &str) {
             children: Vec::new(),
         });
     }
+    let now = Instant::now();
+    acc.text_last = Some(now);
+    acc.output_tokens += crate::estimate_tokens(text);
     acc.content.push_str(text);
     if let Some(last) = acc.parts.last_mut() {
         if last.kind == "text" {
             last.text.push_str(text);
         }
     }
-    sink(StreamEvent::Delta {
-        text: text.to_string(),
-    });
+    acc.pending_delta.push_str(text);
+    if now.duration_since(acc.delta_last).as_millis() >= DELTA_INTERVAL_MS {
+        acc.delta_last = now;
+        let out = std::mem::take(&mut acc.pending_delta);
+        sink(StreamEvent::Delta { text: out });
+    }
+}
+
+fn flush_delta(sink: &EventSink, acc: &mut Acc) {
+    if !acc.pending_delta.is_empty() {
+        sink(StreamEvent::Delta {
+            text: std::mem::take(&mut acc.pending_delta),
+        });
+    }
 }
 
 fn emit_reasoning(sink: &EventSink, acc: &mut Acc, text: &str) {
     if text.is_empty() {
         return;
     }
+    acc.close_text();
     if !acc.reasoning_open {
         acc.reasoning_open = true;
-        acc.text_open = false;
         acc.parts.push(Part {
             kind: "think".to_string(),
             text: String::new(),
@@ -555,15 +657,27 @@ fn emit_reasoning(sink: &EventSink, acc: &mut Acc, text: &str) {
             children: Vec::new(),
         });
     }
+    let now = Instant::now();
     acc.reasoning.push_str(text);
     if let Some(last) = acc.parts.last_mut() {
         if last.kind == "think" {
             last.text.push_str(text);
         }
     }
-    sink(StreamEvent::Reasoning {
-        text: text.to_string(),
-    });
+    acc.pending_reasoning.push_str(text);
+    if now.duration_since(acc.reasoning_last).as_millis() >= DELTA_INTERVAL_MS {
+        acc.reasoning_last = now;
+        let out = std::mem::take(&mut acc.pending_reasoning);
+        sink(StreamEvent::Reasoning { text: out });
+    }
+}
+
+fn flush_reasoning(sink: &EventSink, acc: &mut Acc) {
+    if !acc.pending_reasoning.is_empty() {
+        sink(StreamEvent::Reasoning {
+            text: std::mem::take(&mut acc.pending_reasoning),
+        });
+    }
 }
 
 fn b64_encode(data: &[u8]) -> String {

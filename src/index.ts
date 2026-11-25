@@ -4,6 +4,7 @@ import { state, recallSelection, rememberSelection, recallComposer } from "./sta
 import { bindFollow, buildMessages, mountJumpButton, resetFollow } from "./ui/chat";
 import { buildComposer, refreshUsageDisplay } from "./ui/composer";
 import { el } from "./ui/dom";
+import { buildJumpbar, refreshJumpbar } from "./ui/jumpbar";
 import { buildSettings } from "./ui/settings";
 import { buildSidebar } from "./ui/sidebar";
 import { buildTopbar } from "./ui/topbar";
@@ -15,10 +16,18 @@ function buildMain(): HTMLElement {
 
   const session = state.sessions.find((s) => s.id === state.currentSessionId);
   main.appendChild(el("div", "main-header", session ? session.title : "未选择会话"));
-  main.appendChild(buildMessages());
+
+  const wrap = el("div", "messages-wrap");
+  wrap.appendChild(buildMessages());
+  wrap.appendChild(buildJumpbar());
+  main.appendChild(wrap);
 
   const composerHost = el("div", "composer-host");
-  composerHost.appendChild(buildComposer(render));
+  composerHost.appendChild(
+    buildComposer(() => {
+      renderHeader();
+    })
+  );
   main.appendChild(composerHost);
 
   requestAnimationFrame(() => {
@@ -102,6 +111,7 @@ function renderMessages(): void {
 
   const next = buildMessages();
   old.replaceWith(next);
+  refreshJumpbar();
 
   if (switched || atBottom || wasStreaming) {
     resetFollow();
@@ -156,6 +166,7 @@ function render(): void {
 }
 
 async function boot(): Promise<void> {
+  root.replaceChildren(el("div", "boot-hint", "加载中…"));
   const snap = await api.loadAll();
   state.projects = snap.projects;
   state.sessions = snap.sessions;
@@ -214,4 +225,8 @@ async function boot(): Promise<void> {
   });
 }
 
-void boot();
+void boot().catch((err) => {
+  root.replaceChildren(
+    el("div", "boot-hint is-error", `启动失败：${String(err)}`)
+  );
+});

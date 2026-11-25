@@ -1,12 +1,17 @@
 import * as api from "../api";
-import { renderMarkdown, renderMarkdownTail } from "../markdown";
+import { renderMarkdown } from "../markdown";
 import { state } from "../state";
-import type { Attachment, Part } from "../types";
+import type { Attachment, Message, Part } from "../types";
 import { fmtSize } from "./attach";
+import { copyText } from "./copy";
 import { el } from "./dom";
 import { openRollback } from "./rollback";
+import { renderStreamingText } from "./stream";
 
 const INITIAL_LIMIT = 30;
+
+let loadedStart = -1;
+let pageSession: string | null = null;
 
 // 历史消息里的附件从会话文件夹读回字节渲染，未内联的文件显示为一行 chip
 function attachmentNode(a: Attachment): HTMLElement {
@@ -49,16 +54,56 @@ function foldBlock(
   return details;
 }
 
+function chunkize(body: HTMLElement, maxChars = 8000): void {
+  const nodes = Array.from(body.childNodes);
+  if (nodes.length === 0) return;
+  const groups: HTMLElement[] = [];
+  let current = el("div", "fold-chunk");
+  let size = 0;
+  nodes.forEach((node) => {
+    const text = node.textContent?.length ?? 0;
+    if (size > 0 && size + text > maxChars) {
+      groups.push(current);
+      current = el("div", "fold-chunk");
+      size = 0;
+    }
+    current.appendChild(node);
+    size += text;
+  });
+  if (current.childNodes.length > 0) groups.push(current);
+  body.replaceChildren(...groups);
+}
+
+function textChunks(text: string, className: string): HTMLElement[] {
+  const lines = text.split("\n");
+  const out: HTMLElement[] = [];
+  for (let i = 0; i < lines.length; i += 200) {
+    const pre = el("pre", `${className} fold-chunk`);
+    pre.textContent = lines.slice(i, i + 200).join("\n");
+    out.push(pre);
+  }
+  return out;
+}
+
 function thinkPart(text: string): HTMLElement {
   const body = el("div", "think-body");
   body.innerHTML = renderMarkdown(text);
+  chunkize(body);
   return foldBlock("思考过程", body, "think-block");
 }
 
 function buildDiffElement(diffText: string): HTMLElement {
   const diff = el("div", "diff");
   let firstChange: HTMLElement | null = null;
+  let chunk = el("div", "fold-chunk");
+  diff.appendChild(chunk);
+  let count = 0;
   diffText.split("\n").forEach((line) => {
+    if (count > 0 && count % 200 === 0) {
+      chunk = el("div", "fold-chunk");
+      diff.appendChild(chunk);
+    }
+    count++;
     const row = el("div", "diff-line");
     if (line.startsWith("+")) {
       row.classList.add("is-add");
@@ -70,7 +115,7 @@ function buildDiffElement(diffText: string): HTMLElement {
       row.classList.add("is-meta");
     }
     row.textContent = line.length > 0 ? line : " ";
-    diff.appendChild(row);
+    chunk.appendChild(row);
   });
   if (firstChange) {
     requestAnimationFrame(() => {
@@ -143,7 +188,11 @@ function toolPart(part: Part): HTMLElement {
   const body = el("div", "tool-body");
   const MARKER = "---diff---";
 
-  if (part.detail.includes(MARKER)) {
+  if (part.running) {
+    const pre = el("pre", "tool-output");
+    pre.textContent = part.detail;
+    body.appendChild(pre);
+  } else if (part.detail.includes(MARKER)) {
     const at = part.detail.indexOf(MARKER);
     const head = part.detail.slice(0, at).replace(/\n$/, "");
     const diffText = part.detail.slice(at + MARKER.length).replace(/^\n/, "");
@@ -168,15 +217,15 @@ function toolPart(part: Part): HTMLElement {
       body.appendChild(pre);
       body.appendChild(buildDiffElement(rest.join("\n")));
     } else {
-      const pre = el("pre", "tool-output");
-      pre.textContent = part.detail;
-      body.appendChild(pre);
+      textChunks(part.detail, "tool-output").forEach((pre) => {
+        body.appendChild(pre);
+      });
     }
   } else {
     body.appendChild(el("div", "empty-hint", "无输出"));
   }
 
-  const mark = part.ok ? "✓" : "✕";
+  const mark = part.running ? "…" : part.ok ? "✓" : "✕";
   return foldBlock(`${mark} ${part.summary}`, body, "tool-block");
 }
 
@@ -198,6 +247,67 @@ interface MessageLike {
   reasoning?: string;
   parts?: Part[];
   attachments?: Attachment[];
+  model?: string;
+  created_at?: number;
+  elapsed_ms?: number;
+  output_ms?: number;
+  output_tokens?: number;
+}
+
+function pad2(n: number): string {
+  return String(n).padStart(2, "0");
+}
+
+function fmtTime(ms?: number): string {
+  if (!ms) return "—";
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(
+    d.getHours()
+  )}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+}
+
+function fmtDuration(ms: number): string {
+  if (ms < 1000) return `${ms}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
+  const m = Math.floor(ms / 60_000);
+  const s = Math.round((ms % 60_000) / 1000);
+  return `${m}m ${pad2(s)}s`;
+}
+
+function fmtStats(message: MessageLike): string {
+  const out: string[] = [];
+  if (message.elapsed_ms && message.elapsed_ms > 0) {
+    out.push(`用时 ${fmtDuration(message.elapsed_ms)}`);
+  }
+  if (
+    message.output_ms &&
+    message.output_ms > 0 &&
+    message.output_tokens &&
+    message.output_tokens > 0
+  ) {
+    const speed = message.output_tokens / (message.output_ms / 1000);
+    out.push(`${speed.toFixed(1)} token/s`);
+  }
+  return out.join(" · ");
+}
+
+function buildMeta(
+  role: string,
+  message: MessageLike | undefined,
+  streaming: boolean
+): HTMLElement {
+  const meta = el("div", "msg-meta");
+  meta.appendChild(el("span", "msg-time", fmtTime(message?.created_at)));
+  if (role === "assistant" && !streaming) {
+    const stats = fmtStats(message ?? { content: "" });
+    if (stats) meta.appendChild(el("span", "msg-speed", stats));
+  }
+  if (!streaming) {
+    const copy = el("button", "msg-copy", "复制");
+    copy.title = "复制正文";
+    meta.appendChild(copy);
+  }
+  return meta;
 }
 
 function rerenderMessages(): void {
@@ -205,6 +315,7 @@ function rerenderMessages(): void {
   if (!box) return;
   const next = buildMessages();
   box.replaceWith(next);
+  window.dispatchEvent(new CustomEvent("hyperon:messages-changed"));
   requestAnimationFrame(() => {
     next.scrollTop = next.scrollHeight;
     bindFollow();
@@ -218,26 +329,62 @@ function rollbackButton(messageId: string): HTMLElement {
     btn.classList.add("is-disabled");
     btn.disabled = true;
     btn.title = "正在生成回复，暂不能回溯";
-    return btn;
   }
   btn.addEventListener("click", () => {
+    if (state.streaming) return;
     void openRollback(messageId, rerenderMessages);
   });
   return btn;
 }
 
-function messageRow(role: string, message?: MessageLike): HTMLElement {
+export function refreshRollbackButtons(): void {
+  const box = document.getElementById("messages");
+  if (!box) return;
+  box.querySelectorAll(".rollback-btn").forEach((node) => {
+    const btn = node as HTMLButtonElement;
+    btn.classList.toggle("is-disabled", state.streaming);
+    btn.disabled = state.streaming;
+    btn.title = state.streaming
+      ? "正在生成回复，暂不能回溯"
+      : "回溯到这条消息之前，并还原文件改动";
+  });
+}
+
+function messageRow(
+  role: string,
+  message?: MessageLike,
+  streaming = false
+): HTMLElement {
   const row = el("div", `msg msg-${role}`);
-  const holder = el("div", role === "user" ? "msg-bubble" : "msg-plain");
+  const id = message?.id ?? "";
+  if (id) row.dataset.messageId = id;
 
   if (role === "user") {
+    const wrap = el("div", "msg-col");
+    const holder = el("div", "msg-bubble");
     const body = el("div", "msg-body");
     body.innerHTML = renderMarkdown(message?.content ?? "");
     holder.appendChild(body);
-    (message?.attachments ?? []).forEach((a) => {
-      holder.appendChild(attachmentNode(a));
-    });
-  } else {
+    (message?.attachments ?? []).forEach((a) => holder.appendChild(attachmentNode(a)));
+    wrap.appendChild(holder);
+
+    const meta = buildMeta(role, message, streaming);
+    if (id && !id.startsWith("pending")) {
+      meta.appendChild(rollbackButton(id));
+    }
+    wrap.appendChild(meta);
+    row.appendChild(wrap);
+    return row;
+  }
+
+  const holder = el("div", "msg-plain");
+  const head = el("div", "msg-head");
+  head.appendChild(el("span", "msg-model", message?.model || "AI"));
+  holder.appendChild(head);
+
+  const partsEl = el("div", "msg-parts");
+  holder.appendChild(partsEl);
+  if (!streaming) {
     const parts = message?.parts ?? [];
     if (parts.length === 0) {
       const fallback: Part[] = [];
@@ -257,29 +404,94 @@ function messageRow(role: string, message?: MessageLike): HTMLElement {
         detail: "",
         ok: true,
       });
-      fallback.forEach((p) => holder.appendChild(partNode(p)));
+      fallback.forEach((p) => partsEl.appendChild(partNode(p)));
     } else {
-      parts.forEach((p) => holder.appendChild(partNode(p)));
+      parts.forEach((p) => partsEl.appendChild(partNode(p)));
     }
   }
 
-  if (role === "user") {
-    const wrap = el("div", "msg-col");
-    wrap.appendChild(holder);
-    const id = message?.id ?? "";
-    if (id && !id.startsWith("pending")) {
-      wrap.appendChild(rollbackButton(id));
-    }
-    row.appendChild(wrap);
-  } else {
-    row.appendChild(holder);
-  }
+  holder.appendChild(buildMeta(role, message, streaming));
+  row.appendChild(holder);
   return row;
+}
+
+function messageCopyText(id: string): string {
+  const message = state.messages.find((m) => m.id === id);
+  if (!message) return "";
+  if (message.role === "user") return message.content;
+  const text = (message.parts ?? [])
+    .filter((p) => p.kind === "text")
+    .map((p) => p.text)
+    .join("\n\n");
+  return text || message.content;
+}
+
+function withFeedback(button: HTMLElement, text: string): void {
+  const prev = button.textContent ?? "";
+  button.textContent = text;
+  window.setTimeout(() => {
+    if (button.isConnected) button.textContent = prev;
+  }, 1200);
+}
+
+function bindMessageActions(box: HTMLElement): void {
+  box.addEventListener("click", (event) => {
+    const target = event.target as HTMLElement;
+    const codeBtn = target.closest(".code-copy") as HTMLElement | null;
+    if (codeBtn) {
+      const block = codeBtn.closest(".code-block");
+      const code = block?.querySelector("code");
+      if (!code) return;
+      void copyText(code.textContent ?? "").then((ok) => {
+        if (ok) withFeedback(codeBtn, "已复制");
+      });
+      return;
+    }
+    const msgBtn = target.closest(".msg-copy") as HTMLElement | null;
+    if (!msgBtn) return;
+    const row = msgBtn.closest(".msg") as HTMLElement | null;
+    const id = row?.dataset.messageId ?? "";
+    let text = messageCopyText(id);
+    if (!text && row) {
+      const body = row.querySelector(".msg-body, .msg-parts");
+      text = body?.textContent ?? "";
+    }
+    if (!text) return;
+    void copyText(text).then((ok) => {
+      if (ok) withFeedback(msgBtn, "已复制");
+    });
+  });
+}
+
+function updateLoadMore(more: HTMLButtonElement): void {
+  if (loadedStart <= 0) {
+    more.remove();
+    return;
+  }
+  more.textContent = `加载更早的 ${Math.min(INITIAL_LIMIT, loadedStart)} 条`;
+}
+
+function prependPage(box: HTMLElement, more: HTMLButtonElement | null): void {
+  const from = Math.max(0, loadedStart - INITIAL_LIMIT);
+  if (from >= loadedStart) return;
+  const frag = document.createDocumentFragment();
+  for (let i = from; i < loadedStart; i++) {
+    const m = state.messages[i];
+    frag.appendChild(messageRow(m.role, m));
+  }
+  if (more && more.parentElement === box) {
+    box.insertBefore(frag, more.nextSibling);
+  } else {
+    box.insertBefore(frag, box.firstChild);
+  }
+  loadedStart = from;
+  if (more) updateLoadMore(more);
 }
 
 export function buildMessages(): HTMLElement {
   const box = el("div", "messages");
   box.id = "messages";
+  bindMessageActions(box);
 
   if (!state.currentSessionId) {
     box.appendChild(el("div", "empty-hint center", "选择或新建一个会话"));
@@ -292,31 +504,116 @@ export function buildMessages(): HTMLElement {
   }
 
   const total = state.messages.length;
-  const start = Math.max(0, total - INITIAL_LIMIT);
+  if (pageSession !== state.currentSessionId || loadedStart < 0 || loadedStart > total) {
+    pageSession = state.currentSessionId;
+    loadedStart = Math.max(0, total - INITIAL_LIMIT);
+  }
 
-  if (start > 0) {
-    const more = el("button", "load-more", `加载更早的 ${start} 条`);
+  if (loadedStart > 0) {
+    const more = el("button", "load-more");
+    updateLoadMore(more);
     more.addEventListener("click", () => {
-      more.remove();
-      const frag = document.createDocumentFragment();
-      for (let i = 0; i < start; i++) {
-        const m = state.messages[i];
-        frag.appendChild(messageRow(m.role, m));
-      }
-      box.insertBefore(frag, box.firstChild);
-      const prevTop = box.scrollHeight;
-      requestAnimationFrame(() => {
-        box.scrollTop = box.scrollTop + (box.scrollHeight - prevTop);
-      });
+      const prevHeight = box.scrollHeight;
+      prependPage(box, more);
+      box.scrollTop += box.scrollHeight - prevHeight;
     });
     box.appendChild(more);
   }
 
-  for (let i = start; i < total; i++) {
+  for (let i = loadedStart; i < total; i++) {
     const m = state.messages[i];
     box.appendChild(messageRow(m.role, m));
   }
   return box;
+}
+
+export function ensureLoaded(messageId: string): boolean {
+  const index = state.messages.findIndex((m) => m.id === messageId);
+  if (index < 0) return false;
+  const box = document.getElementById("messages");
+  if (!box) return false;
+  if (
+    pageSession !== state.currentSessionId ||
+    loadedStart < 0 ||
+    loadedStart > state.messages.length
+  ) {
+    pageSession = state.currentSessionId;
+    loadedStart = Math.max(0, state.messages.length - INITIAL_LIMIT);
+  }
+  while (loadedStart > 0 && index < loadedStart) {
+    const more = box.querySelector(".load-more") as HTMLButtonElement | null;
+    prependPage(box, more);
+  }
+  return true;
+}
+
+export function scrollToMessage(messageId: string): void {
+  const box = document.getElementById("messages");
+  if (!box) return;
+  const row = box.querySelector(
+    `[data-message-id="${CSS.escape(messageId)}"]`
+  ) as HTMLElement | null;
+  if (!row) return;
+  row.style.contentVisibility = "visible";
+  const place = (): void => {
+    const top =
+      row.getBoundingClientRect().top -
+      box.getBoundingClientRect().top +
+      box.scrollTop -
+      12;
+    box.scrollTop = Math.max(0, top);
+  };
+  place();
+  requestAnimationFrame(() => {
+    place();
+    row.style.contentVisibility = "";
+  });
+  followTail = false;
+  syncJumpButton(false);
+}
+
+function modelLabel(): string {
+  const provider = state.providers.find((p) => p.id === state.currentProviderId);
+  if (!provider) return "AI";
+  if (provider.name && provider.model) return `${provider.name} · ${provider.model}`;
+  return provider.name || provider.model || "AI";
+}
+
+export function appendUserRow(message: Message): HTMLElement | null {
+  const box = document.getElementById("messages");
+  if (!box) return null;
+  box.querySelector(".empty-hint")?.remove();
+  const row = messageRow("user", message);
+  box.appendChild(row);
+  return row;
+}
+
+export function replaceUserRow(row: HTMLElement, message: Message): void {
+  row.replaceWith(messageRow("user", message));
+}
+
+export function appendStreamingRow(): HTMLElement | null {
+  const box = document.getElementById("messages");
+  if (!box) return null;
+  box.querySelector(".empty-hint")?.remove();
+  const row = messageRow(
+    "assistant",
+    {
+      content: "",
+      parts: [],
+      model: modelLabel(),
+      created_at: Date.now(),
+    },
+    true
+  );
+  row.id = "streaming-row";
+  box.appendChild(row);
+  return row;
+}
+
+export function finishStreamingRow(row: HTMLElement, message: Message): void {
+  row.replaceWith(messageRow("assistant", message));
+  if (followTail) scrollToBottom();
 }
 
 let scrollPending = false;
@@ -333,14 +630,18 @@ function syncJumpButton(atBottom: boolean): void {
   jumpButton.classList.toggle("is-hidden", atBottom);
 }
 
+function scrollToBottom(): void {
+  const box = document.getElementById("messages");
+  if (box) box.scrollTop = box.scrollHeight;
+}
+
 export function requestScroll(): void {
   if (scrollPending) return;
   scrollPending = true;
   requestAnimationFrame(() => {
     scrollPending = false;
     if (!followTail) return;
-    const box = document.getElementById("messages");
-    if (box) box.scrollTop = box.scrollHeight;
+    scrollToBottom();
     syncJumpButton(true);
   });
 }
@@ -377,41 +678,54 @@ export function mountJumpButton(host: HTMLElement): void {
   host.appendChild(btn);
 }
 
-export function appendStreamingRow(): HTMLElement | null {
-  const box = document.getElementById("messages");
-  if (!box) return null;
-  const row = messageRow("assistant", { content: "", parts: [] });
-  row.id = "streaming-row";
-  const holder = row.querySelector(".msg-plain");
-  if (holder) holder.replaceChildren();
-  box.appendChild(row);
-  return row;
-}
-
 export interface StreamPatch {
   index: number;
   part: Part;
 }
 
 export function patchStreamingRow(row: HTMLElement, patch: StreamPatch): void {
-  const holder = row.querySelector(".msg-plain") as HTMLElement | null;
+  const holder = row.querySelector(".msg-parts") as HTMLElement | null;
   if (!holder) return;
 
   let node = holder.children[patch.index] as HTMLElement | undefined;
+  if (node && node.dataset.part !== String(patch.index)) {
+    node = undefined;
+  }
   if (!node) {
-    node = partNode(patch.part);
+    node =
+      (holder.querySelector(
+        `[data-part="${patch.index}"]`
+      ) as HTMLElement | null) ?? undefined;
+  }
+  if (!node) {
+    if (patch.part.kind === "text") {
+      node = el("div", "msg-body");
+      node.dataset.textLen = "0";
+    } else if (patch.part.kind === "think") {
+      node = thinkPart("");
+      const body = node.querySelector(".think-body") as HTMLElement | null;
+      if (body) body.dataset.textLen = "0";
+    } else {
+      node = partNode(patch.part);
+    }
     node.dataset.part = String(patch.index);
     holder.appendChild(node);
-    return;
   }
 
   if (patch.part.kind === "think") {
     const body = node.querySelector(".think-body") as HTMLElement | null;
-    if (body) {
-      body.innerHTML = renderMarkdownTail(patch.part.text || "…");
-      body.scrollTop = body.scrollHeight;
-    }
-  } else if (patch.part.kind === "tool") {
+    if (!body) return;
+    const prev = Number(body.dataset.textLen ?? "0");
+    const next = patch.part.text || "…";
+    if (followTail && next.slice(prev).includes("\n")) scrollToBottom();
+    renderStreamingText(body, next, false);
+    body.dataset.textLen = String(next.length);
+    body.scrollTop = body.scrollHeight;
+    if (followTail) scrollToBottom();
+    return;
+  }
+
+  if (patch.part.kind === "tool") {
     if (patch.part.tool_name === "agent") {
       const head = node.querySelector(".fold-head") as HTMLElement | null;
       if (head) head.textContent = subagentHead(patch.part);
@@ -419,10 +733,27 @@ export function patchStreamingRow(row: HTMLElement, patch: StreamPatch): void {
       if (flow) fillSubagentFlow(flow, patch.part);
       return;
     }
+    if (patch.part.running) {
+      const head = node.querySelector(".fold-head") as HTMLElement | null;
+      if (head) head.textContent = `… ${patch.part.summary}`;
+      const pre = node.querySelector(".tool-output") as HTMLElement | null;
+      if (pre) pre.textContent = patch.part.detail;
+      const fold = node.querySelector(".fold-body") as HTMLElement | null;
+      if (fold) fold.scrollTop = fold.scrollHeight;
+      if (followTail) scrollToBottom();
+      return;
+    }
     const fresh = partNode(patch.part);
     fresh.dataset.part = String(patch.index);
     node.replaceWith(fresh);
-  } else {
-    node.innerHTML = renderMarkdownTail(patch.part.text || "…");
+    if (followTail) scrollToBottom();
+    return;
   }
+
+  const prev = Number(node.dataset.textLen ?? "0");
+  const next = patch.part.text || "…";
+  if (followTail && next.slice(prev).includes("\n")) scrollToBottom();
+  renderStreamingText(node, next, true);
+  node.dataset.textLen = String(next.length);
+  if (followTail) scrollToBottom();
 }

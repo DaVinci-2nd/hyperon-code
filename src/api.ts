@@ -7,6 +7,7 @@ import type {
   Provider,
   RollbackPlan,
   RollbackReport,
+  SendResult,
   Session,
   Settings,
   Snapshot,
@@ -127,10 +128,10 @@ export function sendMessage(
   content: string,
   attachments: Attachment[],
   onEvent: (event: StreamEvent) => void
-): Promise<string> {
+): Promise<SendResult> {
   const channel = new Channel<StreamEvent>();
   channel.onmessage = onEvent;
-  return invoke<string>("send_message", {
+  return invoke<SendResult>("send_message", {
     sessionId,
     providerId,
     content,

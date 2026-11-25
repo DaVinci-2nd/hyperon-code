@@ -191,6 +191,14 @@ pub struct Message {
     pub attachments: Vec<Attachment>,
     #[serde(default)]
     pub created_at: i64,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub elapsed_ms: u64,
+    #[serde(default)]
+    pub output_ms: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

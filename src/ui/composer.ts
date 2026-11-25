@@ -1,6 +1,6 @@
 import * as api from "../api";
 import { state, rememberComposer } from "../state";
-import type { Attachment, Part } from "../types";
+import type { Attachment, Message, Part } from "../types";
 import { buildChip, uploadFile, warnText } from "./attach";
 import {
   beginApproval,
@@ -10,11 +10,16 @@ import {
 } from "./approval";
 import {
   appendStreamingRow,
+  appendUserRow,
+  finishStreamingRow,
   patchStreamingRow,
+  refreshRollbackButtons,
+  replaceUserRow,
   requestScroll,
   resetFollow,
 } from "./chat";
 import { el, option } from "./dom";
+import { refreshJumpbar } from "./jumpbar";
 
 const THINK_LABEL: Record<string, string> = {
   off: "思考：关闭",
@@ -239,9 +244,9 @@ export function buildComposer(onDone: () => void): HTMLElement {
     state.streaming = true;
     setSendBusy();
     paintChips();
+    refreshRollbackButtons();
 
-    state.messages = await api.getMessages(sessionId);
-    state.messages.push({
+    const pendingUser: Message = {
       id: "pending-user",
       session_id: sessionId,
       role: "user",
@@ -250,7 +255,14 @@ export function buildComposer(onDone: () => void): HTMLElement {
       parts: [],
       attachments,
       created_at: Date.now(),
-    });
+      model: "",
+      elapsed_ms: 0,
+      output_ms: 0,
+      output_tokens: 0,
+    };
+    state.messages.push(pendingUser);
+    const userRow = appendUserRow(pendingUser);
+    refreshJumpbar();
     onDone();
     resetFollow();
 
@@ -258,6 +270,7 @@ export function buildComposer(onDone: () => void): HTMLElement {
     const parts: Part[] = [];
     let current: Part | null = null;
     const subagentIndex = new Map<string, number>();
+    const toolIndex = new Map<string, number>();
 
     const activeSubagent = (
       id: string
@@ -302,134 +315,184 @@ export function buildComposer(onDone: () => void): HTMLElement {
     };
 
     try {
-      await api.sendMessage(sessionId, providerId, text, attachments, (event) => {
-        if (event.type === "reasoning") {
-          if (!current || current.kind !== "think") pushPart("think");
-          current!.text += event.text;
-          schedule(parts.length - 1);
-        } else if (event.type === "delta") {
-          if (!current || current.kind !== "text") pushPart("text");
-          current!.text += event.text;
-          schedule(parts.length - 1);
-        } else if (event.type === "approvalstart") {
-          beginApproval(event);
-        } else if (event.type === "approvaldelta") {
-          streamApproval(event);
-        } else if (event.type === "approval") {
-          openApproval(event);
-        } else if (event.type === "subagentstart") {
-          parts.push({
-            kind: "tool",
-            text: "",
-            summary: event.title ? `子代理 · ${event.title}` : "子代理",
-            detail: "",
-            ok: true,
-            tool_name: "agent",
-            tool_args: "",
-            children: [],
-            running: true,
-          });
-          subagentIndex.set(event.id, parts.length - 1);
-          current = null;
-          schedule(parts.length - 1);
-        } else if (event.type === "subagentreasoning") {
-          const item = activeSubagent(event.id);
-          if (item) {
-            const last = item.children[item.children.length - 1];
-            if (last && last.kind === "think") {
-              last.text += event.text;
-            } else {
-              item.children.push({
-                kind: "think",
-                text: event.text,
-                summary: "",
-                detail: "",
-                ok: true,
-              });
-            }
-            schedule(item.index);
-          }
-        } else if (event.type === "subagentdelta") {
-          const item = activeSubagent(event.id);
-          if (item) {
-            const last = item.children[item.children.length - 1];
-            if (last && last.kind === "text") {
-              last.text += event.text;
-            } else {
-              item.children.push({
-                kind: "text",
-                text: event.text,
-                summary: "",
-                detail: "",
-                ok: true,
-              });
-            }
-            schedule(item.index);
-          }
-        } else if (event.type === "subagenttool") {
-          const item = activeSubagent(event.id);
-          if (item) {
-            item.children.push({
+      const result = await api.sendMessage(
+        sessionId,
+        providerId,
+        text,
+        attachments,
+        (event) => {
+          if (event.type === "reasoning") {
+            if (!current || current.kind !== "think") pushPart("think");
+            current!.text += event.text;
+            schedule(parts.length - 1);
+          } else if (event.type === "delta") {
+            if (!current || current.kind !== "text") pushPart("text");
+            current!.text += event.text;
+            schedule(parts.length - 1);
+          } else if (event.type === "approvalstart") {
+            beginApproval(event);
+          } else if (event.type === "approvaldelta") {
+            streamApproval(event);
+          } else if (event.type === "approval") {
+            openApproval(event);
+          } else if (event.type === "subagentstart") {
+            parts.push({
               kind: "tool",
               text: "",
-              summary: event.summary,
-              detail: event.detail,
-              ok: event.ok,
+              summary: event.title ? `子代理 · ${event.title}` : "子代理",
+              detail: "",
+              ok: true,
+              tool_name: "agent",
+              tool_args: "",
+              children: [],
+              running: true,
             });
-            schedule(item.index);
-          }
-        } else if (event.type === "subagentend") {
-          const index = subagentIndex.get(event.id);
-          const part = index === undefined ? null : parts[index];
-          if (index !== undefined && part) {
-            part.ok = event.ok;
-            part.running = false;
-            schedule(index);
-          }
-        } else if (event.type === "toolend") {
-          const index =
-            event.tool === "agent" ? subagentIndex.get(event.id) : undefined;
-          const agentPart = index === undefined ? null : parts[index];
-          if (index !== undefined && agentPart) {
-            agentPart.summary = event.summary;
-            agentPart.detail = event.detail;
-            agentPart.ok = event.ok;
-            agentPart.running = false;
-            schedule(index);
-          } else {
+            subagentIndex.set(event.id, parts.length - 1);
+            current = null;
+            schedule(parts.length - 1);
+          } else if (event.type === "subagentreasoning") {
+            const item = activeSubagent(event.id);
+            if (item) {
+              const last = item.children[item.children.length - 1];
+              if (last && last.kind === "think") {
+                last.text += event.text;
+              } else {
+                item.children.push({
+                  kind: "think",
+                  text: event.text,
+                  summary: "",
+                  detail: "",
+                  ok: true,
+                });
+              }
+              schedule(item.index);
+            }
+          } else if (event.type === "subagentdelta") {
+            const item = activeSubagent(event.id);
+            if (item) {
+              const last = item.children[item.children.length - 1];
+              if (last && last.kind === "text") {
+                last.text += event.text;
+              } else {
+                item.children.push({
+                  kind: "text",
+                  text: event.text,
+                  summary: "",
+                  detail: "",
+                  ok: true,
+                });
+              }
+              schedule(item.index);
+            }
+          } else if (event.type === "subagenttool") {
+            const item = activeSubagent(event.id);
+            if (item) {
+              item.children.push({
+                kind: "tool",
+                text: "",
+                summary: event.summary,
+                detail: event.detail,
+                ok: event.ok,
+              });
+              schedule(item.index);
+            }
+          } else if (event.type === "subagentend") {
+            const index = subagentIndex.get(event.id);
+            const part = index === undefined ? null : parts[index];
+            if (index !== undefined && part) {
+              part.ok = event.ok;
+              part.running = false;
+              schedule(index);
+            }
+          } else if (event.type === "toolstart") {
             parts.push({
               kind: "tool",
               text: "",
               summary: event.summary,
-              detail: event.detail,
-              ok: event.ok,
+              detail: "",
+              ok: true,
+              tool_name: event.tool,
+              tool_args: "",
+              running: true,
             });
+            toolIndex.set(event.id, parts.length - 1);
             current = null;
             schedule(parts.length - 1);
+          } else if (event.type === "tooldelta") {
+            const index = toolIndex.get(event.id);
+            if (index !== undefined && parts[index]) {
+              parts[index].detail += event.text;
+              schedule(index);
+            }
+          } else if (event.type === "toolend") {
+            const index =
+              event.tool === "agent"
+                ? subagentIndex.get(event.id)
+                : toolIndex.get(event.id);
+            const part = index === undefined ? null : parts[index];
+            if (index !== undefined && part) {
+              part.summary = event.summary;
+              part.detail = event.detail;
+              part.ok = event.ok;
+              part.running = false;
+              schedule(index);
+            } else {
+              parts.push({
+                kind: "tool",
+                text: "",
+                summary: event.summary,
+                detail: event.detail,
+                ok: event.ok,
+              });
+              current = null;
+              schedule(parts.length - 1);
+            }
+          } else if (event.type === "usage") {
+            paint(
+              sessionId,
+              event.prompt_tokens,
+              event.context_window,
+              event.cached_tokens
+            );
+          } else if (event.type === "error") {
+            pushPart("text");
+            current!.text += `\n\n请求失败：${event.message}`;
+            schedule(parts.length - 1);
           }
-        } else if (event.type === "usage") {
-          paint(
-            sessionId,
-            event.prompt_tokens,
-            event.context_window,
-            event.cached_tokens
-          );
-        } else if (event.type === "error") {
-          pushPart("text");
-          current!.text += `\n\n请求失败：${event.message}`;
-          schedule(parts.length - 1);
         }
-      });
-      state.messages = await api.getMessages(sessionId);
+      );
+      if (state.currentSessionId === sessionId) {
+        state.streaming = false;
+        const pendingIndex = state.messages.findIndex((m) => m.id === "pending-user");
+        if (pendingIndex >= 0) {
+          state.messages[pendingIndex] = result.user;
+        } else {
+          const userIndex = state.messages.findIndex((m) => m.id === result.user.id);
+          if (userIndex >= 0) state.messages[userIndex] = result.user;
+          else state.messages.push(result.user);
+        }
+        const assistantIndex = state.messages.findIndex(
+          (m) => m.id === result.assistant.id
+        );
+        if (assistantIndex >= 0) state.messages[assistantIndex] = result.assistant;
+        else state.messages.push(result.assistant);
+        if (userRow) replaceUserRow(userRow, result.user);
+        if (row) finishStreamingRow(row, result.assistant);
+        refreshJumpbar();
+      }
     } catch (err) {
-      state.messages = await api.getMessages(sessionId);
-      pushPart("text");
-      current!.text += `\n\n请求失败：${String(err)}`;
-      schedule(parts.length - 1);
+      if (state.currentSessionId === sessionId) {
+        state.messages = await api.getMessages(sessionId);
+        userRow?.remove();
+        pushPart("text");
+        current!.text += `\n\n请求失败：${String(err)}`;
+        schedule(parts.length - 1);
+      }
     } finally {
       state.streaming = false;
       closeApproval();
       setSendIdle();
+      refreshRollbackButtons();
       onDone();
       void refresh();
     }

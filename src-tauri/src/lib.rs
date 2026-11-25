@@ -12,6 +12,7 @@ use presets::Preset;
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 use store::{Attachment, Database, Message, Part, Project, Provider, Session, Settings, BUILTIN_PROJECT_ID};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, State};
@@ -48,6 +49,12 @@ struct Snapshot {
     projects: Vec<Project>,
     sessions: Vec<Session>,
     messages: Vec<Message>,
+}
+
+#[derive(Serialize)]
+struct SendResult {
+    user: Message,
+    assistant: Message,
 }
 
 #[tauri::command]
@@ -273,7 +280,7 @@ fn rollback_apply(
     Ok(report)
 }
 
-fn estimate_tokens(text: &str) -> u64 {
+pub(crate) fn estimate_tokens(text: &str) -> u64 {
     let mut cjk: f64 = 0.0;
     let mut other: f64 = 0.0;
     for ch in text.chars() {
@@ -603,12 +610,13 @@ async fn send_message(
     content: String,
     attachments: Vec<Attachment>,
     channel: Channel<chat::StreamEvent>,
-) -> Result<String, String> {
+) -> Result<SendResult, String> {
     state.cancel.store(false, Ordering::Relaxed);
 
+    let started = Instant::now();
     let assistant_id = store::new_id();
     let user_id = store::new_id();
-    let (provider, mut history, root, system_prompt, subagent_prompt, inline_ids) = {
+    let (provider, mut history, root, system_prompt, subagent_prompt, inline_ids, model) = {
         let mut db = store::load(&app);
         if !db.sessions.iter().any(|s| s.id == session_id) {
             return Err("会话不存在".to_string());
@@ -619,6 +627,13 @@ async fn send_message(
             .find(|p| p.id == provider_id)
             .cloned()
             .ok_or_else(|| "模型未配置".to_string())?;
+        let model = if provider.name.is_empty() {
+            provider.model.clone()
+        } else if provider.model.is_empty() {
+            provider.name.clone()
+        } else {
+            format!("{} · {}", provider.name, provider.model)
+        };
         db.messages.push(Message {
             id: user_id.clone(),
             session_id: session_id.clone(),
@@ -628,6 +643,10 @@ async fn send_message(
             parts: Vec::new(),
             attachments: attachments.clone(),
             created_at: store::now_ms(),
+            model: String::new(),
+            elapsed_ms: 0,
+            output_ms: 0,
+            output_tokens: 0,
         });
         if let Some(s) = db.sessions.iter_mut().find(|s| s.id == session_id) {
             if s.title.starts_with("新会话") {
@@ -670,6 +689,10 @@ async fn send_message(
             parts: Vec::new(),
             attachments: Vec::new(),
             created_at: store::now_ms(),
+            model: model.clone(),
+            elapsed_ms: 0,
+            output_ms: 0,
+            output_tokens: 0,
         });
         store::save(&app, &db);
         (
@@ -679,6 +702,7 @@ async fn send_message(
             db.settings.system_prompt.clone(),
             db.settings.subagent_prompt.clone(),
             inline_ids,
+            model,
         )
     };
 
@@ -724,6 +748,10 @@ async fn send_message(
                 m.content = acc.content.clone();
                 m.reasoning = acc.reasoning.clone();
                 m.parts = acc.parts.clone();
+                m.model = model.clone();
+                m.elapsed_ms = started.elapsed().as_millis() as u64;
+                m.output_ms = acc.output_ms;
+                m.output_tokens = acc.output_tokens;
             }
             if !inline_ids.is_empty() {
                 if let Some(m) = db3.messages.iter_mut().find(|m| m.id == user_id) {
@@ -757,15 +785,27 @@ async fn send_message(
                 }
             }
             store::save(&app, &db3);
-            Ok(assistant_id)
+            let user = db3.messages.iter().find(|m| m.id == user_id).cloned();
+            let assistant = db3.messages.iter().find(|m| m.id == assistant_id).cloned();
+            match (user, assistant) {
+                (Some(user), Some(assistant)) => Ok(SendResult { user, assistant }),
+                _ => Err("消息保存失败".to_string()),
+            }
         }
         Err(err) => {
             let mut db3 = store::load(&app);
             if let Some(m) = db3.messages.iter_mut().find(|m| m.id == assistant_id) {
                 m.content = format!("请求失败：{err}");
+                m.model = model.clone();
+                m.elapsed_ms = started.elapsed().as_millis() as u64;
             }
             store::save(&app, &db3);
-            Err(err)
+            let user = db3.messages.iter().find(|m| m.id == user_id).cloned();
+            let assistant = db3.messages.iter().find(|m| m.id == assistant_id).cloned();
+            match (user, assistant) {
+                (Some(user), Some(assistant)) => Ok(SendResult { user, assistant }),
+                _ => Err(err),
+            }
         }
     }
 }
