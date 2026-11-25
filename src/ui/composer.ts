@@ -95,7 +95,7 @@ export function buildComposer(onDone: () => void): HTMLElement {
   const box = el("div", "composer");
 
   const input = el("textarea", "composer-input");
-  input.placeholder = "输入消息，Ctrl+Enter 发送";
+  input.placeholder = "输入消息，Enter 发送，Shift+Enter 换行";
   input.rows = 2;
   box.appendChild(input);
 
@@ -284,12 +284,17 @@ export function buildComposer(onDone: () => void): HTMLElement {
 
     let frame = 0;
     const dirty = new Set<number>();
+    let activeIndex = -1;
     const flush = (): void => {
       frame = 0;
       if (row) {
         dirty.forEach((index) => {
           if (index >= 0 && index < parts.length) {
-            patchStreamingRow(row, { index, part: parts[index] });
+            patchStreamingRow(row, {
+              index,
+              part: parts[index],
+              active: index === activeIndex,
+            });
           }
         });
       }
@@ -299,6 +304,11 @@ export function buildComposer(onDone: () => void): HTMLElement {
     const schedule = (index: number): void => {
       dirty.add(index);
       if (!frame) frame = requestAnimationFrame(flush);
+    };
+    // 正文段结束时重渲染一次，让最新词的线框消失
+    const settleText = (): void => {
+      if (activeIndex >= 0) schedule(activeIndex);
+      activeIndex = -1;
     };
 
     const pushPart = (kind: string): Part => {
@@ -322,13 +332,17 @@ export function buildComposer(onDone: () => void): HTMLElement {
         attachments,
         (event) => {
           if (event.type === "reasoning") {
-            if (!current || current.kind !== "think") pushPart("think");
+            if (!current || current.kind !== "think") {
+              settleText();
+              pushPart("think");
+            }
             current!.text += event.text;
             schedule(parts.length - 1);
           } else if (event.type === "delta") {
             if (!current || current.kind !== "text") pushPart("text");
             current!.text += event.text;
-            schedule(parts.length - 1);
+            activeIndex = parts.length - 1;
+            schedule(activeIndex);
           } else if (event.type === "approvalstart") {
             beginApproval(event);
           } else if (event.type === "approvaldelta") {
@@ -336,6 +350,7 @@ export function buildComposer(onDone: () => void): HTMLElement {
           } else if (event.type === "approval") {
             openApproval(event);
           } else if (event.type === "subagentstart") {
+            settleText();
             parts.push({
               kind: "tool",
               text: "",
@@ -405,6 +420,7 @@ export function buildComposer(onDone: () => void): HTMLElement {
               schedule(index);
             }
           } else if (event.type === "toolstart") {
+            settleText();
             parts.push({
               kind: "tool",
               text: "",
@@ -437,6 +453,7 @@ export function buildComposer(onDone: () => void): HTMLElement {
               part.running = false;
               schedule(index);
             } else {
+              settleText();
               parts.push({
                 kind: "tool",
                 text: "",
@@ -455,9 +472,12 @@ export function buildComposer(onDone: () => void): HTMLElement {
               event.cached_tokens
             );
           } else if (event.type === "error") {
+            settleText();
             pushPart("text");
             current!.text += `\n\n请求失败：${event.message}`;
             schedule(parts.length - 1);
+          } else if (event.type === "done") {
+            settleText();
           }
         }
       );
@@ -484,6 +504,7 @@ export function buildComposer(onDone: () => void): HTMLElement {
       if (state.currentSessionId === sessionId) {
         state.messages = await api.getMessages(sessionId);
         userRow?.remove();
+        settleText();
         pushPart("text");
         current!.text += `\n\n请求失败：${String(err)}`;
         schedule(parts.length - 1);
@@ -522,10 +543,10 @@ export function buildComposer(onDone: () => void): HTMLElement {
     }
   });
   input.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && e.ctrlKey) {
-      e.preventDefault();
-      void doSend();
-    }
+    if (e.key !== "Enter") return;
+    if (e.shiftKey || e.isComposing || e.keyCode === 229) return;
+    e.preventDefault();
+    void doSend();
   });
   input.addEventListener("paste", (e) => {
     const files = e.clipboardData?.files;

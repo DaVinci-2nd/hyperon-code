@@ -589,7 +589,9 @@ export function appendUserRow(message: Message): HTMLElement | null {
 }
 
 export function replaceUserRow(row: HTMLElement, message: Message): void {
-  row.replaceWith(messageRow("user", message));
+  const next = messageRow("user", message);
+  row.replaceWith(next);
+  reveal(next);
 }
 
 export function appendStreamingRow(): HTMLElement | null {
@@ -608,16 +610,28 @@ export function appendStreamingRow(): HTMLElement | null {
   );
   row.id = "streaming-row";
   box.appendChild(row);
+  reveal(row);
   return row;
 }
 
 export function finishStreamingRow(row: HTMLElement, message: Message): void {
-  row.replaceWith(messageRow("assistant", message));
-  if (followTail) scrollToBottom();
+  const next = messageRow("assistant", message);
+  row.replaceWith(next);
+  reveal(next);
+}
+
+function reveal(node: HTMLElement): void {
+  node.style.contentVisibility = "visible";
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      node.style.contentVisibility = "";
+    });
+  });
 }
 
 let scrollPending = false;
 let followTail = true;
+let expectedTop = -1;
 let jumpButton: HTMLElement | null = null;
 
 export function resetFollow(): void {
@@ -630,9 +644,18 @@ function syncJumpButton(atBottom: boolean): void {
   jumpButton.classList.toggle("is-hidden", atBottom);
 }
 
+function approvalInset(): number {
+  const main = document.querySelector<HTMLElement>(".main");
+  if (!main) return 0;
+  const value = parseFloat(main.style.getPropertyValue("--approval-h"));
+  return Number.isFinite(value) ? value : 0;
+}
+
 function scrollToBottom(): void {
   const box = document.getElementById("messages");
-  if (box) box.scrollTop = box.scrollHeight;
+  if (!box) return;
+  box.scrollTop = box.scrollHeight;
+  expectedTop = box.scrollTop;
 }
 
 export function requestScroll(): void {
@@ -650,7 +673,13 @@ export function bindFollow(): void {
   const box = document.getElementById("messages");
   if (!box) return;
   const update = (): void => {
-    const gap = box.scrollHeight - box.scrollTop - box.clientHeight;
+    const inset = approvalInset();
+    const gap = box.scrollHeight - box.scrollTop - box.clientHeight - inset;
+    if (expectedTop >= 0 && Math.abs(box.scrollTop - expectedTop) <= 2) {
+      syncJumpButton(true);
+      return;
+    }
+    expectedTop = -1;
     followTail = gap < 80;
     syncJumpButton(gap < 80);
   };
@@ -665,7 +694,7 @@ export function buildJumpButton(): HTMLElement {
   btn.addEventListener("click", () => {
     const box = document.getElementById("messages");
     if (!box) return;
-    box.scrollTop = box.scrollHeight;
+    scrollToBottom();
     followTail = true;
     syncJumpButton(true);
   });
@@ -681,6 +710,7 @@ export function mountJumpButton(host: HTMLElement): void {
 export interface StreamPatch {
   index: number;
   part: Part;
+  active: boolean;
 }
 
 export function patchStreamingRow(row: HTMLElement, patch: StreamPatch): void {
@@ -710,6 +740,7 @@ export function patchStreamingRow(row: HTMLElement, patch: StreamPatch): void {
     }
     node.dataset.part = String(patch.index);
     holder.appendChild(node);
+    reveal(node);
   }
 
   if (patch.part.kind === "think") {
@@ -746,6 +777,7 @@ export function patchStreamingRow(row: HTMLElement, patch: StreamPatch): void {
     const fresh = partNode(patch.part);
     fresh.dataset.part = String(patch.index);
     node.replaceWith(fresh);
+    reveal(fresh);
     if (followTail) scrollToBottom();
     return;
   }
@@ -753,7 +785,7 @@ export function patchStreamingRow(row: HTMLElement, patch: StreamPatch): void {
   const prev = Number(node.dataset.textLen ?? "0");
   const next = patch.part.text || "…";
   if (followTail && next.slice(prev).includes("\n")) scrollToBottom();
-  renderStreamingText(node, next, true);
+  renderStreamingText(node, next, patch.active);
   node.dataset.textLen = String(next.length);
   if (followTail) scrollToBottom();
 }

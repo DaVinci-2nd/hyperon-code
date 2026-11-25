@@ -1,5 +1,4 @@
 import * as api from "../api";
-import { requestScroll } from "./chat";
 import { el } from "./dom";
 
 const KIND_LABEL: Record<string, string> = {
@@ -203,7 +202,6 @@ function ensurePanel(id: string, kind: string, tool: string): ApprovalView {
   if (observer) observer.disconnect();
   observer = new ResizeObserver(() => {
     setApprovalHeight(panel.getBoundingClientRect().height);
-    requestScroll();
   });
   observer.observe(panel);
 
