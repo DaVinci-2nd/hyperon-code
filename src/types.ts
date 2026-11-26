@@ -94,12 +94,23 @@ export interface Provider {
   preset: string;
 }
 
+export interface ModelSpec {
+  id: string;
+  thinking: string[];
+  kinds: string[];
+}
+
+export interface ModelInfo {
+  thinking: string[];
+  kinds: string[];
+}
+
 export interface Preset {
   id: string;
   name: string;
   protocol: string;
   base_url: string;
-  models: string[];
+  models: ModelSpec[];
   default_model: string;
 }
 

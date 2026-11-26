@@ -237,7 +237,7 @@ pub fn preview(name: &str, args: &Value, root: Option<&str>) -> ApprovalPreview 
     }
 }
 
-// LCS 单元格数上限，超过时退化为整体替换式输出，避免大文件对比卡顿
+// LCS 单元格数上限
 const DIFF_CELL_LIMIT: usize = 1_500_000;
 
 pub fn diff_text(old: &str, new: &str) -> String {
@@ -356,7 +356,7 @@ fn run(name: &str, args: &Value, root: Option<&str>) -> Result<String, String> {
             let text = match fs::read_to_string(&abs) {
                 Ok(t) => t,
                 Err(e) if e.kind() == std::io::ErrorKind::InvalidData => {
-                    // 二进制文件给一行提示，避免模型对着乱码反复重试
+                    // 二进制文件给一行提示
                     let size = fs::metadata(&abs).map(|m| m.len()).unwrap_or(0);
                     let ext = abs.extension().and_then(|s| s.to_str()).unwrap_or("");
                     return Err(format!(

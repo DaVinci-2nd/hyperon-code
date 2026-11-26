@@ -20,6 +20,7 @@ import {
 } from "./chat";
 import { el, option } from "./dom";
 import { refreshJumpbar } from "./jumpbar";
+import { reload } from "./sidebar";
 
 const THINK_LABEL: Record<string, string> = {
   off: "思考：关闭",
@@ -28,6 +29,8 @@ const THINK_LABEL: Record<string, string> = {
   high: "思考：高",
   max: "思考：最高",
 };
+
+const ALL_THINK_LEVELS: string[] = ["off", "low", "medium", "high", "max"];
 
 let usageTagEl: HTMLElement | null = null;
 let lastUsage: {
@@ -131,7 +134,7 @@ export function buildComposer(onDone: () => void): HTMLElement {
     const text = warnText(pending);
     warn.textContent = text;
     warn.hidden = text.length === 0;
-    setSendIdle();
+    syncSendState();
   };
 
   const addFiles = async (files: FileList | null): Promise<void> => {
@@ -158,21 +161,70 @@ export function buildComposer(onDone: () => void): HTMLElement {
     if (state.currentProviderId === p.id) opt.selected = true;
     model.appendChild(opt);
   });
-  if (!state.currentProviderId && state.providers.length > 0) {
-    state.currentProviderId = state.providers[0].id;
+  const validSelection =
+    state.providers.length > 0 &&
+    state.providers.some((p) => p.id === state.currentProviderId);
+  if (!validSelection) {
+    state.currentProviderId = state.providers[0]?.id ?? "";
   }
   model.addEventListener("change", () => {
     state.currentProviderId = model.value;
     rememberComposer();
+    syncThink(model.value);
   });
   bar.appendChild(model);
 
   const think = el("select", "composer-select");
-  Object.entries(THINK_LABEL).forEach(([key, label]) => {
-    const opt = option(label, key);
-    if (state.thinkingLevel === key) opt.selected = true;
-    think.appendChild(opt);
-  });
+
+  // 思考档位跟随模型能力收窄
+  const paintThink = (levels: string[]): void => {
+    const prev = state.thinkingLevel;
+    think.replaceChildren();
+    levels.forEach((key) => {
+      const opt = option(THINK_LABEL[key] ?? key, key);
+      if (prev === key) opt.selected = true;
+      think.appendChild(opt);
+    });
+    if (!levels.includes(prev)) {
+      state.thinkingLevel = levels.includes("medium")
+        ? "medium"
+        : levels[levels.length - 1];
+      think.value = state.thinkingLevel;
+      rememberComposer();
+    }
+  };
+
+  // 每次切换模型递增序号
+  let specEpoch = 0;
+
+  const syncThink = (providerId: string): void => {
+    const epoch = ++specEpoch;
+    const p = state.providers.find((x) => x.id === providerId);
+    if (!p) {
+      paintThink(ALL_THINK_LEVELS);
+      return;
+    }
+    const spec = state.presets
+      .flatMap((x) => x.models)
+      .find((m) => m.id === p.model);
+    if (spec && spec.thinking.length > 0) {
+      paintThink(spec.thinking);
+      return;
+    }
+    api
+      .modelInfo(p.protocol, p.model)
+      .then((info) => {
+        if (epoch !== specEpoch) return;
+        paintThink(info.thinking.length > 0 ? info.thinking : ALL_THINK_LEVELS);
+      })
+      .catch(() => {
+        if (epoch !== specEpoch) return;
+        paintThink(ALL_THINK_LEVELS);
+      });
+  };
+
+  paintThink(ALL_THINK_LEVELS);
+  syncThink(state.currentProviderId);
   think.addEventListener("change", () => {
     state.thinkingLevel = think.value;
     rememberComposer();
@@ -205,7 +257,16 @@ export function buildComposer(onDone: () => void): HTMLElement {
     send.title = "停止";
   };
 
-  setSendIdle();
+  // 按钮外观只由全局流式状态决定
+  const syncSendState = (): void => {
+    if (state.streaming) {
+      setSendBusy();
+    } else {
+      setSendIdle();
+    }
+  };
+
+  syncSendState();
 
   const paint = (
     sessionId: string,
@@ -305,7 +366,7 @@ export function buildComposer(onDone: () => void): HTMLElement {
       dirty.add(index);
       if (!frame) frame = requestAnimationFrame(flush);
     };
-    // 正文段结束时重渲染一次，让最新词的线框消失
+    // 正文段结束时重渲染一次
     const settleText = (): void => {
       if (activeIndex >= 0) schedule(activeIndex);
       activeIndex = -1;
@@ -512,11 +573,16 @@ export function buildComposer(onDone: () => void): HTMLElement {
     } finally {
       state.streaming = false;
       closeApproval();
-      setSendIdle();
+      syncSendState();
       refreshRollbackButtons();
+      try {
+        await reload();
+      } catch {
+        /* 列表保持原样 */
+      }
       onDone();
       void refresh();
-      // 本次回复可能产生了文件变更，通知右栏变更页刷新
+      // 本次回复可能产生了文件变更
       window.dispatchEvent(new CustomEvent("hyperon:changes-updated"));
     }
   };

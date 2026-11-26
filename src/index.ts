@@ -27,6 +27,7 @@ function buildMain(): HTMLElement {
   composerHost.appendChild(
     buildComposer(() => {
       renderHeader();
+      renderSidebar();
     })
   );
   main.appendChild(composerHost);
@@ -139,7 +140,7 @@ function render(): void {
       swapBody(buildChatTab());
     }
   } else if (state.tab === "settings") {
-    if (!app.querySelector(".settings")) swapBody(buildSettings(render));
+    swapBody(buildSettings(render));
   } else {
     if (!app.querySelector(".blank-tab")) swapBody(el("div", "blank-tab"));
   }

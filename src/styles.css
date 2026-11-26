@@ -1516,6 +1516,12 @@ select {
   margin-bottom: 6px;
 }
 
+.provider-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
 .provider-name {
   font-weight: 600;
 }

@@ -6,7 +6,7 @@ import { el, option } from "./dom";
 
 let paneHost: HTMLElement | null = null;
 
-// 会话工具配置缺失或字段非法时回默认值，旧数据损坏不影响界面
+// 会话工具配置缺失或字段非法时回默认值
 function sessionTools(): SessionTools {
   const inject = currentSession()?.tools?.prompt_inject;
   return {
@@ -25,7 +25,7 @@ async function saveTools(tools: SessionTools): Promise<void> {
   try {
     await api.updateSessionTools(session.id, tools);
   } catch {
-    /* 保存失败不打断界面，下次改动会再尝试 */
+    /* 保存失败不打断界面 */
   }
 }
 
@@ -85,7 +85,7 @@ function injectCard(): HTMLElement {
   area.addEventListener("input", () => {
     hint.hidden = area.value.trim().length > 0;
   });
-  // 逐键保存太频繁，失焦时落盘
+  // 逐键保存太频繁
   area.addEventListener("blur", () => void saveTools(read()));
   select.addEventListener("change", () => void saveTools(read()));
 
@@ -100,7 +100,7 @@ function buildToolsPane(): HTMLElement {
     return pane;
   }
 
-  // 工具列表，每项一张卡，便于后续扩展更多工具
+  // 工具列表
   pane.appendChild(injectCard());
   return pane;
 }
@@ -131,7 +131,7 @@ function changeItem(c: ChangeSummary, sessionId: string): HTMLDetailsElement {
   body.appendChild(el("div", "change-hint", "加载中…"));
   details.appendChild(body);
 
-  // 展开时才拉取对比内容，列表保持轻量
+  // 展开时才拉取对比内容
   let loaded = false;
   details.addEventListener("toggle", () => {
     if (!details.open || loaded) return;
@@ -191,7 +191,7 @@ function showPane(key: string): void {
   if (key === "changes") {
     paneHost.replaceChildren(el("div", "empty-hint center", "加载中…"));
     void buildChangesPane().then((pane) => {
-      // 异步返回时可能已切页或切会话，确认仍停留在此页才落地
+      // 异步返回时可能已切页或切会话
       if (paneHost && state.rightTab === "changes") paneHost.replaceChildren(pane);
     });
   } else {
@@ -237,7 +237,7 @@ export function refreshRightPanel(): void {
   showPane(state.rightTab);
 }
 
-// 发送完成后可能有新的变更记录，变更页可见时刷新
+// 发送完成后可能有新的变更记录
 window.addEventListener("hyperon:changes-updated", () => {
   if (state.rightTab === "changes") refreshRightPanel();
 });

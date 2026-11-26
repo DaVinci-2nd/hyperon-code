@@ -13,7 +13,7 @@ const INITIAL_LIMIT = 30;
 let loadedStart = -1;
 let pageSession: string | null = null;
 
-// 历史消息里的附件从会话文件夹读回字节渲染，未内联的文件显示为一行 chip
+// 历史消息里的附件从会话文件夹读回字节渲染
 function attachmentNode(a: Attachment): HTMLElement {
   if (a.mime.startsWith("image/")) {
     const img = el("img", "attach-thumb");

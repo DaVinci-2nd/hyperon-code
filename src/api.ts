@@ -4,6 +4,7 @@ import type {
   ChangeDiff,
   ChangeSummary,
   Message,
+  ModelInfo,
   Preset,
   Project,
   Provider,
@@ -27,6 +28,10 @@ export function saveSettings(settings: Settings): Promise<void> {
 
 export function listPresets(): Promise<Preset[]> {
   return invoke<Preset[]>("list_presets");
+}
+
+export function modelInfo(protocol: string, model: string): Promise<ModelInfo> {
+  return invoke<ModelInfo>("model_info", { protocol, model });
 }
 
 export function addProvider(provider: Provider): Promise<Provider> {

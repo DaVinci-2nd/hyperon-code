@@ -82,6 +82,11 @@ fn list_presets() -> Vec<Preset> {
 }
 
 #[tauri::command]
+fn model_info(protocol: String, model: String) -> presets::ModelInfo {
+    presets::model_info(&protocol, &model)
+}
+
+#[tauri::command]
 fn add_provider(app: AppHandle, provider: Provider) -> Result<Provider, String> {
     let mut db = store::load(&app);
     let mut p = provider;
@@ -231,7 +236,7 @@ fn delete_session(app: AppHandle, id: String) {
     let mut db = store::load(&app);
     db.sessions.retain(|s| s.id != id);
     db.messages.retain(|m| m.session_id != id);
-    // 变更轨迹随会话消失，避免留下无人引用的记录
+    // 变更轨迹随会话消失
     db.changes.retain(|c| c.session_id != id);
     // 会话附件目录与会话共存亡
     let _ = std::fs::remove_dir_all(store::session_dir(&app, &id));
@@ -253,7 +258,7 @@ fn get_messages_sync(app: AppHandle, session_id: String) -> Result<Vec<Message>,
     get_messages(app, session_id)
 }
 
-// 变更列表只带元信息，before/after 全文按需单条拉取，避免整包下发大文件
+// 变更列表只带元信息
 #[derive(Serialize)]
 struct ChangeSummary {
     id: String,
@@ -373,7 +378,7 @@ pub(crate) fn estimate_tokens(text: &str) -> u64 {
     (cjk * 0.6 + other * 0.3).round() as u64
 }
 
-// 附件以索引行告知路径与大小，让模型用 read 工具自取；多模态内联仅挂最新一条消息
+// 附件以索引行告知路径与大小
 fn index_lines(app: &AppHandle, session_id: &str, attachments: &[Attachment]) -> String {
     let dir = store::session_dir(app, session_id);
     let mut out = String::new();
@@ -424,7 +429,7 @@ fn build_history(
         }
 
         assistant_index += 1;
-        // 只保留第一次和最近一次回复的思考，其余回复的思考在发送时置空
+        // 只保留第一次和最近一次回复的思考
         let keep_thinking =
             !strip_thinking || assistant_index == 1 || assistant_index == assistant_total;
         let reasoning = if keep_thinking && !m.reasoning.is_empty() {
@@ -553,7 +558,7 @@ fn build_history(
     out
 }
 
-// 提示词注入只改发给模型的最新一条用户消息，本地记录保留原文
+// 提示词注入只改发给模型的最新一条用户消息
 fn apply_prompt_inject(history: &mut [ChatMessage], inject: &store::PromptInject) {
     let text = inject.content.trim();
     if !inject.enabled || text.is_empty() {
@@ -669,7 +674,7 @@ fn estimate_context(
         strip_thinking,
         db.settings.strip_duplicate_tool_results,
     );
-    // 估算与真实发送一致，同样给最新一条用户消息带上注入内容
+    // 估算与真实发送一致
     let inject = db
         .sessions
         .iter()
@@ -763,7 +768,7 @@ async fn send_message(
             db.settings.strip_thinking,
             db.settings.strip_duplicate_tool_results,
         );
-        // 仅最新一条用户消息内联多模态，历史附件只留索引行
+        // 仅最新一条用户消息内联多模态
         let mut inline_ids: Vec<String> = Vec::new();
         if !attachments.is_empty() {
             if let Some(last) = history.last_mut() {
@@ -815,7 +820,7 @@ async fn send_message(
         )
     };
 
-    // 发送前把注入内容拼进最新一条用户消息，db 里保存的仍是用户原文
+    // 发送前把注入内容拼进最新一条用户消息
     apply_prompt_inject(&mut history, &inject);
 
     let usage_slot: Arc<std::sync::Mutex<Option<(u64, u64)>>> =
@@ -930,6 +935,7 @@ pub fn run() {
             load_all,
             save_settings,
             list_presets,
+            model_info,
             add_provider,
             update_provider,
             delete_provider,

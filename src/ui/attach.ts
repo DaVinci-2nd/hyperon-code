@@ -12,7 +12,7 @@ export function fmtSize(bytes: number): string {
   return `${bytes}B`;
 }
 
-// Canvas 归一化：超长边压缩并重编码为 png/jpeg；gif/webp 原样保留；解不开的图返回 null
+// Canvas 归一化
 async function normalizeImage(
   file: File
 ): Promise<{ bytes: Uint8Array; blob: Blob; mime: string } | null> {

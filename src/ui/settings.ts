@@ -1,6 +1,6 @@
 import * as api from "../api";
 import { state } from "../state";
-import type { Provider } from "../types";
+import type { ModelInfo, Provider } from "../types";
 import { el, field, openModal, option } from "./dom";
 
 const THINK_OPTIONS: Array<[string, string]> = [
@@ -10,6 +10,8 @@ const THINK_OPTIONS: Array<[string, string]> = [
   ["high", "高"],
   ["max", "最高"],
 ];
+
+const THINK_DEFAULT: string[] = ["off", "low", "medium", "high", "max"];
 
 const IMAGE_OPTIONS: Array<[string, string]> = [
   ["off", "关闭"],
@@ -28,7 +30,7 @@ async function reloadProviders(): Promise<void> {
   state.providers = snap.providers;
 }
 
-function openAddProvider(onDone: () => void): void {
+function openProviderForm(existing: Provider | null, onDone: () => void): void {
   const body = el("div", "form");
 
   const presetRow = el("div", "preset-grid");
@@ -43,19 +45,13 @@ function openAddProvider(onDone: () => void): void {
   PROTOCOL_OPTIONS.forEach(([v, l]) => protocolSelect.appendChild(option(l, v)));
   const baseInput = el("input", "input");
   baseInput.placeholder = "https://api.example.com/v1";
-  const modelInput = el("input", "input");
-  modelInput.placeholder = "模型名";
   const keyInput = el("input", "input");
   keyInput.type = "password";
   keyInput.placeholder = "API Key";
 
   const thinkSelect = el("select", "input");
-  THINK_OPTIONS.forEach(([v, l]) => thinkSelect.appendChild(option(l, v)));
-  thinkSelect.value = "medium";
-
   const imageSelect = el("select", "input");
   IMAGE_OPTIONS.forEach(([v, l]) => imageSelect.appendChild(option(l, v)));
-  imageSelect.value = "high";
 
   let currentPreset = "";
 
@@ -73,7 +69,67 @@ function openAddProvider(onDone: () => void): void {
   fields.appendChild(field("接口地址", baseInput));
   fields.appendChild(field("API Key", keyInput));
   fields.appendChild(field("思考强度", thinkSelect));
-  fields.appendChild(field("图像强度", imageSelect));
+  const imageField = field("图像强度", imageSelect);
+  fields.appendChild(imageField);
+
+  // 视觉项默认取高
+  let visualChoice = "high";
+
+  // 依据模型能力收窄表单选项
+  const applySpec = (spec: { thinking: string[]; kinds: string[] } | null): void => {
+    const levels = spec && spec.thinking.length > 0 ? spec.thinking : THINK_DEFAULT;
+    const prev = thinkSelect.value;
+    thinkSelect.replaceChildren();
+    levels.forEach((lv) => {
+      const found = THINK_OPTIONS.find(([v]) => v === lv);
+      thinkSelect.appendChild(option(found ? found[1] : lv, lv));
+    });
+    thinkSelect.value = levels.includes(prev)
+      ? prev
+      : levels.includes("medium")
+        ? "medium"
+        : levels[levels.length - 1];
+
+    const visual = spec === null || spec.kinds.includes("image");
+    imageField.style.display = visual ? "" : "none";
+    if (visual) {
+      imageSelect.value = visualChoice;
+    } else {
+      if (imageSelect.value !== "off") visualChoice = imageSelect.value;
+      imageSelect.value = "off";
+    }
+  };
+
+  const specOf = (modelId: string) => {
+    const preset = state.presets.find((p) => p.id === currentPreset);
+    return preset ? preset.models.find((m) => m.id === modelId) ?? null : null;
+  };
+
+  // 手填模型的能力查询异步返回
+  let specEpoch = 0;
+
+  const syncSpec = (): void => {
+    const epoch = ++specEpoch;
+    const hand = customModel.value.trim();
+    if (hand) {
+      const known = specOf(hand);
+      if (known) {
+        applySpec(known);
+        return;
+      }
+      api
+        .modelInfo(protocolSelect.value, hand)
+        .then((info: ModelInfo) => {
+          if (epoch === specEpoch) applySpec(info);
+        })
+        .catch(() => {
+          if (epoch === specEpoch) applySpec(null);
+        });
+      return;
+    }
+    const picked = modelSelect.value;
+    applySpec(picked ? specOf(picked) : null);
+  };
 
   const fillPreset = (id: string): void => {
     currentPreset = id;
@@ -83,12 +139,13 @@ function openAddProvider(onDone: () => void): void {
     protocolSelect.value = preset.protocol;
     baseInput.value = preset.base_url;
     modelSelect.replaceChildren();
-    preset.models.forEach((m) => modelSelect.appendChild(option(m, m)));
+    preset.models.forEach((m) => modelSelect.appendChild(option(m.id, m.id)));
     if (preset.default_model) modelSelect.value = preset.default_model;
     customModel.value = "";
     presetRow.querySelectorAll(".preset-card").forEach((c) => {
       c.classList.toggle("is-active", (c as HTMLElement).dataset.id === id);
     });
+    syncSpec();
   };
 
   state.presets.forEach((p) => {
@@ -98,16 +155,53 @@ function openAddProvider(onDone: () => void): void {
     presetRow.appendChild(card);
   });
 
-  if (state.presets.length > 0) fillPreset(state.presets[0].id);
+  if (existing) {
+    currentPreset = existing.preset;
+    nameInput.value = existing.name;
+    protocolSelect.value = existing.protocol;
+    baseInput.value = existing.base_url;
+    keyInput.value = existing.api_key;
+    const preset = state.presets.find((p) => p.id === existing.preset);
+    if (preset) {
+      modelSelect.replaceChildren();
+      preset.models.forEach((m) => modelSelect.appendChild(option(m.id, m.id)));
+    }
+    if (preset && preset.models.some((m) => m.id === existing.model)) {
+      modelSelect.value = existing.model;
+      customModel.value = "";
+    } else {
+      customModel.value = existing.model;
+    }
+    imageSelect.value = existing.image;
+    visualChoice = existing.image;
+    presetRow.querySelectorAll(".preset-card").forEach((c) => {
+      c.classList.toggle(
+        "is-active",
+        (c as HTMLElement).dataset.id === existing.preset
+      );
+    });
+    applySpec(specOf(existing.model));
+    // 保存的档位仍在能力集内则恢复
+    const savedLevels = Array.from(thinkSelect.options).map((o) => o.value);
+    if (savedLevels.includes(existing.thinking)) {
+      thinkSelect.value = existing.thinking;
+    }
+  } else if (state.presets.length > 0) {
+    fillPreset(state.presets[0].id);
+  }
 
-  openModal("添加模型", body, [
+  modelSelect.addEventListener("change", syncSpec);
+  customModel.addEventListener("change", syncSpec);
+  protocolSelect.addEventListener("change", syncSpec);
+
+  openModal(existing ? "修改模型" : "添加模型", body, [
     { label: "取消", onClick: (close) => close() },
     {
       label: "保存",
       primary: true,
       onClick: async (close) => {
         const provider: Provider = {
-          id: "",
+          id: existing ? existing.id : "",
           name: nameInput.value.trim() || "未命名",
           protocol: protocolSelect.value,
           base_url: baseInput.value.trim(),
@@ -117,7 +211,11 @@ function openAddProvider(onDone: () => void): void {
           image: imageSelect.value,
           preset: currentPreset,
         };
-        await api.addProvider(provider);
+        if (existing) {
+          await api.updateProvider(provider);
+        } else {
+          await api.addProvider(provider);
+        }
         await reloadProviders();
         close();
         onDone();
@@ -229,7 +327,14 @@ export function buildSettings(onChange: () => void): HTMLElement {
 
   const paneHost = el("div", "settings-pane-host");
 
+  // 所在子页跟随全局状态
+  const initial = Math.max(
+    0,
+    tabs.findIndex(([key]) => key === state.settingsTab)
+  );
+
   const activate = (index: number): void => {
+    state.settingsTab = tabs[index][0];
     side.querySelectorAll(".settings-tab").forEach((t, i) => {
       t.classList.toggle("is-active", i === index);
     });
@@ -238,13 +343,13 @@ export function buildSettings(onChange: () => void): HTMLElement {
 
   tabs.forEach(([label], i) => {
     const item = el("button", "settings-tab", label);
-    if (i === 0) item.classList.add("is-active");
+    if (i === initial) item.classList.add("is-active");
     item.addEventListener("click", () => activate(i));
     side.appendChild(item);
   });
   wrap.appendChild(side);
 
-  paneHost.appendChild(tabs[0][1]());
+  paneHost.appendChild(tabs[initial][1]());
   wrap.appendChild(paneHost);
 
   return wrap;
@@ -256,7 +361,7 @@ function buildProviderPane(onChange: () => void): HTMLElement {
   const head = el("div", "settings-head");
   head.appendChild(el("div", "settings-title", "模型供应"));
   const add = el("button", "btn btn-primary", "＋ 添加模型");
-  add.addEventListener("click", () => openAddProvider(onChange));
+  add.addEventListener("click", () => openProviderForm(null, onChange));
   head.appendChild(add);
   pane.appendChild(head);
 
@@ -268,6 +373,11 @@ function buildProviderPane(onChange: () => void): HTMLElement {
     const card = el("div", "provider-card");
     const top = el("div", "provider-top");
     top.appendChild(el("div", "provider-name", p.name));
+    const actions = el("div", "provider-actions");
+    const edit = el("button", "icon-btn", "✎");
+    edit.title = "修改";
+    edit.addEventListener("click", () => openProviderForm(p, onChange));
+    actions.appendChild(edit);
     const del = el("button", "icon-btn", "×");
     del.title = "删除";
     del.addEventListener("click", async () => {
@@ -275,7 +385,8 @@ function buildProviderPane(onChange: () => void): HTMLElement {
       await reloadProviders();
       onChange();
     });
-    top.appendChild(del);
+    actions.appendChild(del);
+    top.appendChild(actions);
     card.appendChild(top);
     card.appendChild(el("div", "provider-model", p.model));
     card.appendChild(el("div", "provider-meta", p.base_url));

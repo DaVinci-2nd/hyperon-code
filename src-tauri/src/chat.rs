@@ -704,19 +704,43 @@ fn b64_encode(data: &[u8]) -> String {
     out
 }
 
-fn media_kind(mime: &str, kinds: &[&str], protocol: &str) -> Option<&'static str> {
+fn media_kind(mime: &str, kinds: &[&str], protocol: &str, host: &str) -> Option<&'static str> {
     let kind = if mime.starts_with("image/") {
-        if !matches!(
-            mime,
-            "image/png" | "image/jpeg" | "image/webp" | "image/gif" | "image/heic" | "image/heif"
-        ) {
+        // 各端点位图白名单不一
+        let ok = if protocol == "anthropic" {
+            matches!(mime, "image/png" | "image/jpeg" | "image/webp" | "image/gif")
+        } else if host.contains("bigmodel") || host.contains("z.ai") {
+            matches!(mime, "image/png" | "image/jpeg")
+        } else if host.contains("moonshot") || host.contains("kimi.com") {
+            matches!(
+                mime,
+                "image/png"
+                    | "image/jpeg"
+                    | "image/webp"
+                    | "image/gif"
+                    | "image/heic"
+                    | "image/heif"
+                    | "image/bmp"
+            )
+        } else {
+            matches!(
+                mime,
+                "image/png"
+                    | "image/jpeg"
+                    | "image/webp"
+                    | "image/gif"
+                    | "image/heic"
+                    | "image/heif"
+            )
+        };
+        if !ok {
             return None;
         }
         "image"
     } else if mime.starts_with("video/") {
         "video"
     } else if mime.starts_with("audio/") {
-        // OpenAI 协议仅收 wav/mp3，其余模态交给原生支持方
+        // OpenAI 协议仅收 wav/mp3
         if protocol != "gemini" && !mime.contains("wav") && !mime.contains("mpeg") && !mime.contains("mp3") {
             return None;
         }
@@ -733,7 +757,7 @@ fn media_kind(mime: &str, kinds: &[&str], protocol: &str) -> Option<&'static str
     }
 }
 
-// 附件按能力表挑选可内联项，读盘转 base64；不可内联的附件由索引行兜底
+// 附件按能力表挑选可内联项
 pub fn inline_media(
     app: &AppHandle,
     provider: &Provider,
@@ -745,11 +769,22 @@ pub fn inline_media(
         return None;
     }
     let dir = crate::store::session_dir(app, session_id);
+    let host = provider.base_url.to_lowercase();
+    // 智谱一条请求只收一类多模态输入
+    let single_kind = host.contains("bigmodel") || host.contains("z.ai");
+    let mut locked: Option<&str> = None;
     let mut out: Vec<MediaPart> = Vec::new();
     for a in attachments {
-        let Some(kind) = media_kind(&a.mime, kinds, &provider.protocol) else {
+        let Some(kind) = media_kind(&a.mime, kinds, &provider.protocol, &host) else {
             continue;
         };
+        if single_kind {
+            match locked {
+                Some(k) if k != kind => continue,
+                None => locked = Some(kind),
+                _ => {}
+            }
+        }
         if kind == "image" && provider.image == "off" {
             continue;
         }
@@ -772,18 +807,21 @@ pub fn inline_media(
 }
 
 fn openai_media(m: &ChatMessage, host: &str, provider: &Provider) -> Value {
-    let bare = host.contains("bigmodel");
-    let with_detail = !bare
-        && (host.contains("openai")
-            || host.contains("openrouter")
-            || host.contains("x.ai")
-            || host.contains("deepseek"));
+    let is_openai = host.contains("openai");
+    let is_router = host.contains("openrouter");
+    let is_xai = host.contains("x.ai");
+    let is_deepseek = host.contains("deepseek");
+    let is_glm = host.contains("bigmodel") || host.contains("z.ai");
+    // detail 仅对声明支持图档参数的端点发送
+    let with_detail = is_openai || is_router || is_xai || is_deepseek;
     let detail = presets::image_detail(&provider.image);
+    // GLM-4 系收裸 base64
+    let legacy_glm = is_glm && provider.model.to_lowercase().starts_with("glm-4");
     let mut parts: Vec<Value> = vec![json!({ "type": "text", "text": m.content })];
     for p in m.media.as_deref().unwrap_or(&[]) {
         match p.kind.as_str() {
             "image" => {
-                let url = if bare {
+                let url = if legacy_glm {
                     p.data.clone()
                 } else {
                     format!("data:{};base64,{}", p.mime, p.data)
@@ -801,14 +839,23 @@ fn openai_media(m: &ChatMessage, host: &str, provider: &Provider) -> Value {
                     "input_audio": { "data": p.data, "format": fmt }
                 }));
             }
-            "pdf" => {
+            "video" => {
                 parts.push(json!({
-                    "type": "file",
-                    "file": {
-                        "filename": p.name,
-                        "file_data": format!("data:application/pdf;base64,{}", p.data)
-                    }
+                    "type": "video_url",
+                    "video_url": { "url": format!("data:{};base64,{}", p.mime, p.data) }
                 }));
+            }
+            "pdf" => {
+                // PDF 分块仅 OpenAI 官方与 OpenRouter 能解析
+                if is_openai || is_router {
+                    parts.push(json!({
+                        "type": "file",
+                        "file": {
+                            "filename": p.name,
+                            "file_data": format!("data:application/pdf;base64,{}", p.data)
+                        }
+                    }));
+                }
             }
             _ => {}
         }
@@ -824,7 +871,11 @@ fn build_openai_body(
 ) -> Value {
     let host = provider.base_url.to_lowercase();
     let is_deepseek = host.contains("deepseek");
-    let is_glm = host.contains("bigmodel");
+    let is_glm = host.contains("bigmodel") || host.contains("z.ai");
+    let is_kimi = host.contains("moonshot") || host.contains("kimi.com");
+    let is_dashscope = host.contains("dashscope") || host.contains("aliyuncs");
+    let is_ark = host.contains("volces");
+    let is_minimax = host.contains("minimax");
 
     let mut list: Vec<Value> = Vec::new();
     if !system_prompt.is_empty() {
@@ -856,17 +907,46 @@ fn build_openai_body(
     });
 
     if presets::is_thinking_on(&provider.thinking) {
-        if let Some(effort) = presets::thinking_effort(&provider.thinking) {
-            body["reasoning_effort"] = json!(effort);
-        }
-        if is_deepseek || is_glm {
+        if is_dashscope {
+            // 千问用扩展参数开关思考
+            body["enable_thinking"] = json!(true);
+            if let Some(effort) = presets::qwen_effort(&provider.model, &provider.thinking) {
+                body["reasoning_effort"] = json!(effort);
+            }
+        } else if is_ark {
             body["thinking"] = json!({ "type": "enabled" });
+        } else if is_kimi {
+            body["reasoning_effort"] =
+                json!(presets::effort_trimmed(&provider.thinking).unwrap_or("high"));
+        } else if is_glm {
+            body["reasoning_effort"] =
+                json!(presets::effort_trimmed(&provider.thinking).unwrap_or("high"));
+            body["thinking"] = json!({ "type": "enabled" });
+        } else if is_minimax {
+            // MiniMax 未定义推理强度参数
+        } else if is_deepseek {
+            let effort =
+                presets::deepseek_effort(&provider.thinking).unwrap_or("high");
+            body["reasoning_effort"] = json!(effort);
+            body["thinking"] = json!({ "type": "enabled" });
+        } else {
+            let effort =
+                presets::openai_effort(&provider.model, &provider.thinking).unwrap_or("medium");
+            body["reasoning_effort"] = json!(effort);
         }
     } else if is_deepseek {
         body["thinking"] = json!({ "type": "disabled" });
     } else if is_glm {
+        // GLM-5 系拒绝关闭思考
         body["thinking"] = json!({ "type": "enabled" });
         body["reasoning_effort"] = json!("low");
+    } else if is_kimi {
+        // K3 系思考常开
+        body["reasoning_effort"] = json!("low");
+    } else if is_dashscope {
+        body["enable_thinking"] = json!(false);
+    } else if is_ark {
+        body["thinking"] = json!({ "type": "disabled" });
     }
 
     body
@@ -1250,7 +1330,6 @@ fn build_anthropic_body(
         }
     }
 
-    let mut budget: u32 = 0;
     let mut body = json!({
         "model": provider.model,
         "max_tokens": 8192,
@@ -1274,14 +1353,8 @@ fn build_anthropic_body(
         }]);
     }
 
-    if let Some(b) = presets::thinking_budget(&provider.thinking) {
-        budget = b;
-        body["thinking"] = json!({ "type": "enabled", "budget_tokens": b });
-    }
-
-    let need = budget as u64 + 1024;
-    if need > 8192 {
-        body["max_tokens"] = json!(need);
+    if let Some(effort) = presets::anthropic_effort(&provider.thinking) {
+        body["output_config"] = json!({ "effort": effort });
     }
 
     body
@@ -1521,10 +1594,8 @@ fn build_gemini_body(
     let mut body = json!({ "contents": contents, "tools": tools::gemini_tools(readonly) });
 
     let mut gen = json!({});
-    if let Some(budget) = presets::thinking_budget(&provider.thinking) {
-        gen["thinkingConfig"] = json!({ "thinkingBudget": budget, "includeThoughts": true });
-    } else if provider.thinking == "off" {
-        gen["thinkingConfig"] = json!({ "thinkingBudget": 0 });
+    if let Some(level) = presets::gemini_level(&provider.model, &provider.thinking) {
+        gen["thinkingConfig"] = json!({ "thinkingLevel": level, "includeThoughts": true });
     }
     if gen.as_object().map(|o| !o.is_empty()).unwrap_or(false) {
         body["generationConfig"] = gen;
