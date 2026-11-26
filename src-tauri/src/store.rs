@@ -112,6 +112,48 @@ pub struct Session {
     pub last_prompt_tokens: u64,
     #[serde(default)]
     pub last_cached_tokens: u64,
+    // 工具配置跟随会话保存，旧数据缺失或损坏时回默认值
+    #[serde(default)]
+    pub tools: SessionTools,
+}
+
+// 提示词注入工具的配置：位置只有 before / after 两种，非法值按 before 处理
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PromptInject {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub content: String,
+    #[serde(default = "default_position")]
+    pub position: String,
+}
+
+fn default_position() -> String {
+    "before".to_string()
+}
+
+impl Default for PromptInject {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            content: String::new(),
+            position: default_position(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionTools {
+    #[serde(default)]
+    pub prompt_inject: PromptInject,
+}
+
+impl Default for SessionTools {
+    fn default() -> Self {
+        Self {
+            prompt_inject: PromptInject::default(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

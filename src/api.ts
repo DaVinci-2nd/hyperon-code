@@ -1,6 +1,8 @@
 import { invoke, Channel } from "@tauri-apps/api/core";
 import type {
   Attachment,
+  ChangeDiff,
+  ChangeSummary,
   Message,
   Preset,
   Project,
@@ -9,6 +11,7 @@ import type {
   RollbackReport,
   SendResult,
   Session,
+  SessionTools,
   Settings,
   Snapshot,
   StreamEvent,
@@ -64,6 +67,21 @@ export function updateSession(id: string, title: string): Promise<void> {
 
 export function deleteSession(id: string): Promise<void> {
   return invoke("delete_session", { id });
+}
+
+export function updateSessionTools(id: string, tools: SessionTools): Promise<void> {
+  return invoke("update_session_tools", { id, tools });
+}
+
+export function getChanges(sessionId: string): Promise<ChangeSummary[]> {
+  return invoke<ChangeSummary[]>("get_changes", { sessionId });
+}
+
+export function getChangeDiff(
+  sessionId: string,
+  changeId: string
+): Promise<ChangeDiff> {
+  return invoke<ChangeDiff>("get_change_diff", { sessionId, changeId });
 }
 
 export function getMessages(sessionId: string): Promise<Message[]> {

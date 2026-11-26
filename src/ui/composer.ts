@@ -516,6 +516,8 @@ export function buildComposer(onDone: () => void): HTMLElement {
       refreshRollbackButtons();
       onDone();
       void refresh();
+      // 本次回复可能产生了文件变更，通知右栏变更页刷新
+      window.dispatchEvent(new CustomEvent("hyperon:changes-updated"));
     }
   };
 

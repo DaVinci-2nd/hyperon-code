@@ -46,6 +46,33 @@ export interface Session {
   project_id: string;
   title: string;
   created_at: number;
+  tools?: SessionTools;
+}
+
+export interface PromptInject {
+  enabled: boolean;
+  content: string;
+  position: string;
+}
+
+export interface SessionTools {
+  prompt_inject: PromptInject;
+}
+
+export interface ChangeSummary {
+  id: string;
+  message_id: string;
+  path: string;
+  existed: boolean;
+  known: boolean;
+  created_at: number;
+}
+
+export interface ChangeDiff {
+  path: string;
+  existed: boolean;
+  known: boolean;
+  diff: string;
 }
 
 export interface Project {

@@ -13,7 +13,7 @@ use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-use store::{Attachment, Database, Message, Part, Project, Provider, Session, Settings, BUILTIN_PROJECT_ID};
+use store::{Attachment, Database, Message, Part, Project, Provider, Session, SessionTools, Settings, BUILTIN_PROJECT_ID};
 use tauri::ipc::Channel;
 use tauri::{AppHandle, State};
 
@@ -210,6 +210,7 @@ fn create_session(app: AppHandle, project_id: String) -> Result<Session, String>
         created_at: store::now_ms(),
         last_prompt_tokens: 0,
         last_cached_tokens: 0,
+        tools: SessionTools::default(),
     };
     db.sessions.push(session.clone());
     store::save(&app, &db);
@@ -230,6 +231,8 @@ fn delete_session(app: AppHandle, id: String) {
     let mut db = store::load(&app);
     db.sessions.retain(|s| s.id != id);
     db.messages.retain(|m| m.session_id != id);
+    // 变更轨迹随会话消失，避免留下无人引用的记录
+    db.changes.retain(|c| c.session_id != id);
     // 会话附件目录与会话共存亡
     let _ = std::fs::remove_dir_all(store::session_dir(&app, &id));
     store::save(&app, &db);
@@ -248,6 +251,80 @@ fn get_messages(app: AppHandle, session_id: String) -> Result<Vec<Message>, Stri
 #[tauri::command]
 fn get_messages_sync(app: AppHandle, session_id: String) -> Result<Vec<Message>, String> {
     get_messages(app, session_id)
+}
+
+// 变更列表只带元信息，before/after 全文按需单条拉取，避免整包下发大文件
+#[derive(Serialize)]
+struct ChangeSummary {
+    id: String,
+    message_id: String,
+    path: String,
+    existed: bool,
+    known: bool,
+    created_at: i64,
+}
+
+#[derive(Serialize)]
+struct ChangeDiff {
+    path: String,
+    existed: bool,
+    known: bool,
+    diff: String,
+}
+
+#[tauri::command]
+fn get_changes(app: AppHandle, session_id: String) -> Vec<ChangeSummary> {
+    let db = store::load(&app);
+    db.changes
+        .iter()
+        .filter(|c| c.session_id == session_id)
+        .map(|c| ChangeSummary {
+            id: c.id.clone(),
+            message_id: c.message_id.clone(),
+            path: c.path.clone(),
+            existed: c.existed,
+            known: c.known,
+            created_at: c.created_at,
+        })
+        .collect()
+}
+
+#[tauri::command]
+fn get_change_diff(
+    app: AppHandle,
+    session_id: String,
+    change_id: String,
+) -> Result<ChangeDiff, String> {
+    let db = store::load(&app);
+    let c = db
+        .changes
+        .iter()
+        .find(|c| c.session_id == session_id && c.id == change_id)
+        .ok_or_else(|| "变更记录不存在".to_string())?;
+    let known = c.known && c.before.is_some();
+    let diff = match &c.before {
+        Some(before) if known => tools::diff_text(before, &c.after),
+        _ => String::new(),
+    };
+    Ok(ChangeDiff {
+        path: c.path.clone(),
+        existed: c.existed,
+        known,
+        diff,
+    })
+}
+
+#[tauri::command]
+fn update_session_tools(app: AppHandle, id: String, tools: SessionTools) -> Result<(), String> {
+    let mut db = store::load(&app);
+    let s = db
+        .sessions
+        .iter_mut()
+        .find(|s| s.id == id)
+        .ok_or_else(|| "会话不存在".to_string())?;
+    s.tools = tools;
+    store::save(&app, &db);
+    Ok(())
 }
 
 #[tauri::command]
@@ -476,6 +553,23 @@ fn build_history(
     out
 }
 
+// 提示词注入只改发给模型的最新一条用户消息，本地记录保留原文
+fn apply_prompt_inject(history: &mut [ChatMessage], inject: &store::PromptInject) {
+    let text = inject.content.trim();
+    if !inject.enabled || text.is_empty() {
+        return;
+    }
+    let Some(last) = history.last_mut() else { return };
+    if last.role != "user" {
+        return;
+    }
+    last.content = if inject.position == "after" {
+        format!("{}\n\n{}", last.content, text)
+    } else {
+        format!("{}\n\n{}", text, last.content)
+    };
+}
+
 fn percent_decode(text: &str) -> String {
     let bytes = text.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
@@ -567,7 +661,7 @@ fn estimate_context(
     };
     total += estimate_tokens(&tools_json.to_string());
 
-    let history = build_history(
+    let mut history = build_history(
         &app,
         &db,
         &session_id,
@@ -575,6 +669,14 @@ fn estimate_context(
         strip_thinking,
         db.settings.strip_duplicate_tool_results,
     );
+    // 估算与真实发送一致，同样给最新一条用户消息带上注入内容
+    let inject = db
+        .sessions
+        .iter()
+        .find(|s| s.id == session_id)
+        .map(|s| s.tools.prompt_inject.clone())
+        .unwrap_or_default();
+    apply_prompt_inject(&mut history, &inject);
     for m in &history {
         total += estimate_tokens(&serde_json::to_string(m).unwrap_or_default());
     }
@@ -616,7 +718,7 @@ async fn send_message(
     let started = Instant::now();
     let assistant_id = store::new_id();
     let user_id = store::new_id();
-    let (provider, mut history, root, system_prompt, subagent_prompt, inline_ids, model) = {
+    let (provider, mut history, root, system_prompt, subagent_prompt, inline_ids, model, inject) = {
         let mut db = store::load(&app);
         if !db.sessions.iter().any(|s| s.id == session_id) {
             return Err("会话不存在".to_string());
@@ -680,6 +782,12 @@ async fn send_message(
             .find(|s| s.id == session_id)
             .and_then(|s| db.projects.iter().find(|p| p.id == s.project_id))
             .and_then(|p| p.dirs.first().cloned());
+        let inject = db
+            .sessions
+            .iter()
+            .find(|s| s.id == session_id)
+            .map(|s| s.tools.prompt_inject.clone())
+            .unwrap_or_default();
         db.messages.push(Message {
             id: assistant_id.clone(),
             session_id: session_id.clone(),
@@ -703,8 +811,12 @@ async fn send_message(
             db.settings.subagent_prompt.clone(),
             inline_ids,
             model,
+            inject,
         )
     };
+
+    // 发送前把注入内容拼进最新一条用户消息，db 里保存的仍是用户原文
+    apply_prompt_inject(&mut history, &inject);
 
     let usage_slot: Arc<std::sync::Mutex<Option<(u64, u64)>>> =
         Arc::new(std::sync::Mutex::new(None));
@@ -830,6 +942,9 @@ pub fn run() {
             delete_session,
             get_messages,
             get_messages_sync,
+            get_changes,
+            get_change_diff,
+            update_session_tools,
             save_upload,
             read_attachment,
             rollback_preview,

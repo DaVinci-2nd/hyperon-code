@@ -5,6 +5,7 @@ import { bindFollow, buildMessages, mountJumpButton, resetFollow } from "./ui/ch
 import { buildComposer, refreshUsageDisplay } from "./ui/composer";
 import { el } from "./ui/dom";
 import { buildJumpbar, refreshJumpbar } from "./ui/jumpbar";
+import { buildRightPanel, refreshRightPanel } from "./ui/rightpanel";
 import { buildSettings } from "./ui/settings";
 import { buildSidebar } from "./ui/sidebar";
 import { buildTopbar } from "./ui/topbar";
@@ -35,28 +36,6 @@ function buildMain(): HTMLElement {
     bindFollow();
   });
   return main;
-}
-
-function buildRightPanel(): HTMLElement {
-  const panel = el("div", "right-panel");
-
-  const tabs = el("div", "right-tabs");
-  [
-    { key: "tools", label: "工具" },
-    { key: "changes", label: "变更" },
-  ].forEach((t) => {
-    const btn = el("button", "right-tab", t.label);
-    if (state.rightTab === t.key) btn.classList.add("is-active");
-    btn.addEventListener("click", () => {
-      state.rightTab = t.key;
-      render();
-    });
-    tabs.appendChild(btn);
-  });
-  panel.appendChild(tabs);
-  panel.appendChild(el("div", "right-body", "暂无内容"));
-
-  return panel;
 }
 
 function buildChatTab(): HTMLElement {
@@ -155,6 +134,7 @@ function render(): void {
     if (existing) {
       renderSidebar();
       renderMessages();
+      refreshRightPanel();
     } else {
       swapBody(buildChatTab());
     }

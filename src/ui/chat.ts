@@ -92,7 +92,7 @@ function thinkPart(text: string): HTMLElement {
   return foldBlock("思考过程", body, "think-block");
 }
 
-function buildDiffElement(diffText: string): HTMLElement {
+export function buildDiffElement(diffText: string): HTMLElement {
   const diff = el("div", "diff");
   let firstChange: HTMLElement | null = null;
   let chunk = el("div", "fold-chunk");

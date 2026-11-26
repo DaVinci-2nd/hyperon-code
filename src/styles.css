@@ -1088,11 +1088,142 @@ select {
 .right-body {
   flex: 1;
   min-height: 0;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+}
+
+.right-pane {
+  padding: 10px;
+}
+
+/* 工具卡片 */
+
+.tool-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--panel-2);
+  overflow: hidden;
+}
+
+.tool-card-head {
   display: flex;
   align-items: center;
-  justify-content: center;
+  gap: 10px;
+  padding: 10px 12px;
+}
+
+.tool-card-text {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.tool-card-desc {
+  margin-top: 2px;
+  font-size: 11px;
   color: var(--muted);
+}
+
+.tool-card-body {
+  padding: 2px 12px 12px;
+  border-top: 1px solid var(--border);
+}
+
+.tool-card-body[hidden] {
+  display: none;
+}
+
+.tool-field-label {
+  margin: 10px 0 4px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.tool-field-hint {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.tool-area {
+  width: 100%;
+  min-height: 72px;
+  padding: 6px 9px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  font-family: var(--font-ui);
   font-size: 12px;
+  line-height: 1.5;
+  resize: vertical;
+  outline: none;
+}
+
+.tool-area:focus {
+  border-color: var(--accent);
+}
+
+.tool-select {
+  height: 26px;
+  padding: 0 6px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  outline: none;
+}
+
+/* 变更列表 */
+
+.change-item + .change-item {
+  margin-top: 8px;
+}
+
+.change-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.change-tag {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--active);
+  color: var(--text);
+  font-size: 10px;
+}
+
+.change-tag.is-new {
+  background: var(--accent);
+  color: #ffffff;
+}
+
+.change-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.change-time {
+  flex: 0 0 auto;
+  font-size: 10px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.change-hint {
+  padding: 4px 0;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* 展开后的对比交给右栏整体滚动，折叠体不再限高 */
+.change-item .fold-body {
+  max-height: none;
+  overflow: visible;
 }
 
 .blank-tab {

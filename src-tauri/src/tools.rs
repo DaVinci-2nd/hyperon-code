@@ -237,11 +237,26 @@ pub fn preview(name: &str, args: &Value, root: Option<&str>) -> ApprovalPreview 
     }
 }
 
-fn diff_text(old: &str, new: &str) -> String {
+// LCS 单元格数上限，超过时退化为整体替换式输出，避免大文件对比卡顿
+const DIFF_CELL_LIMIT: usize = 1_500_000;
+
+pub fn diff_text(old: &str, new: &str) -> String {
     let a: Vec<&str> = old.lines().collect();
     let b: Vec<&str> = new.lines().collect();
     let n = a.len();
     let m = b.len();
+
+    if n.saturating_mul(m) > DIFF_CELL_LIMIT {
+        let mut out: Vec<String> = Vec::with_capacity(n + m + 1);
+        out.push(format!("（对比规模超限，退化为整体替换：-{n} 行 / +{m} 行）"));
+        for line in &a {
+            out.push(format!("-{line}"));
+        }
+        for line in &b {
+            out.push(format!("+{line}"));
+        }
+        return out.join("\n");
+    }
 
     let mut lcs = vec![vec![0usize; m + 1]; n + 1];
     for i in (0..n).rev() {
